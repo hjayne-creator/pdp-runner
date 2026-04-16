@@ -20,9 +20,25 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_DEFAULT_ORIGINS = [
+    "https://pdp-runner-production.up.railway.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+]
+
+# ALLOWED_ORIGINS env var accepts a comma-separated list of origins.
+# Falls back to the defaults above when not set.
+_env_origins = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins = (
+    [o.strip() for o in _env_origins.split(",") if o.strip()]
+    if _env_origins
+    else _DEFAULT_ORIGINS
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
