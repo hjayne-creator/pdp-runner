@@ -217,8 +217,19 @@ async def _fetch_with_playwright(url: str) -> dict:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                ],
+            )
             page = await browser.new_page(extra_http_headers=HEADERS)
+            # Mask navigator.webdriver so Cloudflare's bot detection sees a
+            # real browser rather than a headless automation context.
+            await page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
             html = await page.content()
