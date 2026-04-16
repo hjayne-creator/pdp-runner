@@ -1,5 +1,8 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from database import engine
 import models
 from routers import customers, prompts, ai_models, jobs
@@ -34,3 +37,18 @@ app.include_router(jobs.router, prefix="/api")
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "PDP Runner"}
+
+
+# Serve React frontend static files (production build)
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
+
+    @app.get("/favicon.svg")
+    def favicon():
+        return FileResponse(os.path.join(STATIC_DIR, "favicon.svg"))
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        """Catch-all: serve index.html for all non-API routes (SPA client-side routing)."""
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
