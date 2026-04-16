@@ -1,0 +1,17 @@
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/venv
+backend/static
+
+# Node
+frontend/node_modules
+frontend/dist
+
+# Dev artifacts
+.git
+.gitignore
+*.md
+start.sh

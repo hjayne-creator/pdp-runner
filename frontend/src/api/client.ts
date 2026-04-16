@@ -2,7 +2,7 @@ import type {
   Customer, Prompt, AIModel, Job, JobCreate, SSEEvent,
 } from './types';
 
-const BASE = 'http://localhost:8000/api';
+const BASE = '/api';
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
