@@ -36,11 +36,24 @@ export interface AIModel {
   updated_at: string;
 }
 
+export interface ReportTemplate {
+  id: string;
+  key: string;
+  label: string;
+  description?: string;
+  output_contract: string;
+  active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Job {
   id: string;
   customer_id: string;
   prompt_id: string;
   model_id: string;
+  report_template: string;
   input_url: string;
   pdp_data?: Record<string, unknown>;
   prompt_rendered?: string;
@@ -62,6 +75,7 @@ export interface JobCreate {
   prompt_id: string;
   model_id: string;
   input_url: string;
+  report_template: string;
 }
 
 export type SSEEvent =

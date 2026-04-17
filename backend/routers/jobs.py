@@ -16,6 +16,7 @@ from services.pdp_service import (
     pdp_is_actionable,
     render_prompt,
 )
+from services.report_templates import DEFAULT_REPORT_TEMPLATE
 from services.ai_service import run_ai_stream
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -93,6 +94,19 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
     if not model_obj:
         raise HTTPException(404, detail="Model not found")
 
+    template_key = body.report_template or DEFAULT_REPORT_TEMPLATE
+    template_obj = (
+        db.query(models.ReportTemplate)
+        .filter(
+            models.ReportTemplate.key == template_key,
+            models.ReportTemplate.active == True,
+        )
+        .first()
+    )
+    if not template_obj:
+        # Fall back to built-in default for backward compatibility.
+        template_key = DEFAULT_REPORT_TEMPLATE
+
     # Extract all needed values as plain scalars NOW, while the session is alive.
     # The event_stream generator runs after FastAPI closes the request-scoped
     # session, so ORM instances become detached and attribute access fails.
@@ -108,6 +122,7 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         customer_id=body.customer_id,
         prompt_id=body.prompt_id,
         model_id=body.model_id,
+        report_template=template_key,
         input_url=body.input_url,
         status="running",
     )
@@ -134,7 +149,13 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
 
             # 2. Render prompt (stored for history even if we skip the model)
             yield f"data: {json.dumps({'type': 'status', 'message': 'Rendering prompt...'})}\n\n"
-            rendered = render_prompt(prompt_content, pdp_data, body.input_url)
+            rendered = render_prompt(
+                prompt_content,
+                pdp_data,
+                body.input_url,
+                template_key,
+                db,
+            )
 
             if not pdp_is_actionable(pdp_data):
                 reason = (
@@ -142,7 +163,9 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                     or "The product URL did not return usable page content after automatic retries."
                 )
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Skipping model: no usable PDP content (blocked or empty).'})}\n\n"
-                blocked = blocked_analysis_json(reason)
+                blocked = blocked_analysis_json(
+                    reason, template_key
+                )
                 output_chunks.append(blocked)
                 yield f"data: {json.dumps({'type': 'token', 'content': blocked})}\n\n"
             else:

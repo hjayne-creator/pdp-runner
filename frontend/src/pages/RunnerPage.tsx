@@ -6,10 +6,13 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
-import type { Customer, Prompt, AIModel, SSEEvent } from '../api/types';
-import { parseReport } from '../utils/report';
+import type { Customer, Prompt, AIModel, SSEEvent, ReportTemplate } from '../api/types';
 import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
-import { ReportView } from '../components/ReportView';
+import {
+  getKnownReportTemplate,
+  listKnownReportTemplates,
+  DEFAULT_REPORT_TEMPLATE,
+} from '../utils/reportTemplates';
 
 type Status = 'idle' | 'fetching' | 'running' | 'done' | 'error';
 
@@ -22,11 +25,13 @@ export function RunnerPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [models, setModels] = useState<AIModel[]>([]);
+  const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
 
   const [url, setUrl] = useState('');
   const [customerId, setCustomerId] = useState('');
   const [promptId, setPromptId] = useState('');
   const [modelId, setModelId] = useState('');
+  const [reportTemplate, setReportTemplate] = useState(DEFAULT_REPORT_TEMPLATE);
 
   const [status, setStatus] = useState<Status>('idle');
   const [statusMessages, setStatusMessages] = useState<StatusMsg[]>([]);
@@ -42,6 +47,7 @@ export function RunnerPage() {
   // Load customers + models
   useEffect(() => {
     api.customers.list().then(setCustomers).catch(console.error);
+    api.reportTemplates.list(true).then(setReportTemplates).catch(console.error);
     api.models.list().then((ms) => {
       setModels(ms);
       if (ms.length > 0 && !modelId) setModelId(ms[0].id);
@@ -57,6 +63,12 @@ export function RunnerPage() {
       else setPromptId('');
     }).catch(console.error);
   }, [customerId]);
+
+  useEffect(() => {
+    if (reportTemplates.length === 0) return;
+    const exists = reportTemplates.some((template) => template.key === reportTemplate);
+    if (!exists) setReportTemplate(reportTemplates[0].key);
+  }, [reportTemplates, reportTemplate]);
 
   // Auto-scroll output
   useEffect(() => {
@@ -79,7 +91,13 @@ export function RunnerPage() {
 
     try {
       await api.jobs.run(
-        { customer_id: customerId, prompt_id: promptId, model_id: modelId, input_url: url.trim() },
+        {
+          customer_id: customerId,
+          prompt_id: promptId,
+          model_id: modelId,
+          input_url: url.trim(),
+          report_template: reportTemplate,
+        },
         (event: SSEEvent) => {
           if (event.type === 'status') {
             setStatusMessages((m) => [...m, { type: 'status', message: event.message }]);
@@ -108,7 +126,7 @@ export function RunnerPage() {
         setStatus('error');
       }
     }
-  }, [canRun, url, customerId, promptId, modelId]);
+  }, [canRun, url, customerId, promptId, modelId, reportTemplate]);
 
   const handleStop = () => {
     abortRef.current?.abort();
@@ -141,7 +159,22 @@ export function RunnerPage() {
 
   const selectedModel = models.find((m) => m.id === modelId);
   const selectedPrompt = prompts.find((p) => p.id === promptId);
-  const parsedReport = parseReport(output);
+  const availableTemplates = reportTemplates.length > 0
+    ? reportTemplates
+    : listKnownReportTemplates().map((t) => ({
+      id: t.id,
+      key: t.id,
+      label: t.label,
+      description: t.description,
+      output_contract: '',
+      active: true,
+      sort_order: 100,
+      created_at: '',
+      updated_at: '',
+    }));
+  const selectedTemplateMeta = availableTemplates.find((t) => t.key === reportTemplate) ?? availableTemplates[0];
+  const selectedTemplate = getKnownReportTemplate(selectedTemplateMeta?.key);
+  const parsedReport = selectedTemplate ? selectedTemplate.parse(output) : null;
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
@@ -238,6 +271,24 @@ export function RunnerPage() {
               {selectedModel && (
                 <p className="mt-1.5 text-xs text-gray-400">{selectedModel.description}</p>
               )}
+            </div>
+
+            {/* Report Template */}
+            <div>
+              <label className="label">Report Template</label>
+              <select
+                className="select"
+                value={reportTemplate}
+                onChange={(e) => setReportTemplate(e.target.value)}
+                disabled={status === 'running'}
+              >
+                {availableTemplates.map((template) => (
+                  <option key={template.id} value={template.key}>{template.label}</option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-xs text-gray-400">
+                {selectedTemplateMeta?.description || 'Template description not provided.'}
+              </p>
             </div>
           </div>
 
@@ -349,7 +400,7 @@ export function RunnerPage() {
                     type="button"
                     onClick={handleDownloadPdf}
                     className="btn-secondary text-xs px-2.5 py-1.5"
-                    title="Download AI output as PDF"
+                    title="Download report as PDF"
                   >
                     <FileDown className="w-3 h-3" />
                     PDF
@@ -387,8 +438,8 @@ export function RunnerPage() {
 
             {output && (
               <div ref={pdfContentRef} className="bg-white rounded-lg p-4 shadow-sm">
-                {parsedReport && status !== 'running' ? (
-                  <ReportView report={parsedReport} />
+                {selectedTemplate && parsedReport && status !== 'running' ? (
+                  <>{selectedTemplate.render(parsedReport)}</>
                 ) : (
                   <div
                     className={clsx(

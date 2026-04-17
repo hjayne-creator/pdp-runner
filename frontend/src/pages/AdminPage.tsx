@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings, Users, FileText, Cpu, Plus, Pencil, Trash2,
-  ChevronDown, ChevronUp, Tag, Loader2, AlertCircle, CheckCircle2,
+  ChevronDown, ChevronUp, Tag, Loader2, AlertCircle, CheckCircle2, FileJson,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
-import type { Customer, Prompt, AIModel } from '../api/types';
+import type { Customer, Prompt, AIModel, ReportTemplate } from '../api/types';
 import { Modal } from '../components/Modal';
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -611,6 +611,210 @@ function ModelsSection({ toast }: { toast: (t: ToastType, m: string) => void }) 
   );
 }
 
+function ReportTemplatesSection({ toast }: { toast: (t: ToastType, m: string) => void }) {
+  const [templates, setTemplates] = useState<ReportTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<ReportTemplate | null>(null);
+  const [form, setForm] = useState({
+    key: '',
+    label: '',
+    description: '',
+    output_contract: '',
+    active: true,
+    sort_order: 100,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const reload = () => api.reportTemplates.list(false).then(setTemplates).finally(() => setLoading(false));
+  useEffect(() => { reload(); }, []);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm({
+      key: '',
+      label: '',
+      description: '',
+      output_contract: '',
+      active: true,
+      sort_order: 100,
+    });
+    setOpen(true);
+  };
+
+  const openEdit = (template: ReportTemplate) => {
+    setEditing(template);
+    setForm({
+      key: template.key,
+      label: template.label,
+      description: template.description ?? '',
+      output_contract: template.output_contract,
+      active: template.active,
+      sort_order: template.sort_order,
+    });
+    setOpen(true);
+  };
+
+  const handleSave = async () => {
+    if (!form.key || !form.label || !form.output_contract) return;
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.reportTemplates.update(editing.id, form);
+        toast('success', 'Report template updated');
+      } else {
+        await api.reportTemplates.create(form);
+        toast('success', 'Report template created');
+      }
+      setOpen(false);
+      reload();
+    } catch (e: unknown) {
+      toast('error', e instanceof Error ? e.message : 'Error saving report template');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this report template?')) return;
+    try {
+      await api.reportTemplates.delete(id);
+      toast('success', 'Report template deleted');
+      reload();
+    } catch (e: unknown) {
+      toast('error', e instanceof Error ? e.message : 'Error deleting report template');
+    }
+  };
+
+  return (
+    <>
+      <Section
+        icon={FileJson}
+        title="Report Templates"
+        count={templates.length}
+        action={
+          <button onClick={openCreate} className="btn-primary text-xs py-1.5 px-3">
+            <Plus className="w-3.5 h-3.5" /> New Template
+          </button>
+        }
+      >
+        {loading ? (
+          <div className="py-8 flex justify-center text-gray-300"><Loader2 className="animate-spin" /></div>
+        ) : templates.length === 0 ? (
+          <p className="py-8 text-center text-sm text-gray-400">No report templates configured.</p>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {templates.map((template) => (
+              <li key={template.id} className="flex items-center gap-4 px-5 py-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-gray-900">{template.label}</p>
+                    <span className={template.active ? 'badge-green text-xs' : 'badge-gray text-xs'}>
+                      {template.active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p className="text-xs font-mono text-gray-400 mt-0.5">{template.key}</p>
+                  {template.description && (
+                    <p className="text-xs text-gray-500 mt-0.5 truncate">{template.description}</p>
+                  )}
+                </div>
+                <span className="text-xs text-gray-400">Order: {template.sort_order}</span>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit(template)} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={() => handleDelete(template.id)} className="p-1.5 rounded hover:bg-red-50 text-gray-400 hover:text-red-500">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Modal open={open} onClose={() => setOpen(false)} title={editing ? 'Edit Report Template' : 'New Report Template'} size="xl">
+        <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Key</label>
+              <input
+                className="input font-mono"
+                value={form.key}
+                onChange={(e) => setForm((f) => ({ ...f, key: e.target.value }))}
+                placeholder="pdp-audit-v1"
+              />
+            </div>
+            <div>
+              <label className="label">Label</label>
+              <input
+                className="input"
+                value={form.label}
+                onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                placeholder="PDP Audit (Detailed)"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="label">Description</label>
+            <input
+              className="input"
+              value={form.description}
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              placeholder="Displayed in template selector"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Sort Order</label>
+              <input
+                type="number"
+                className="input"
+                value={form.sort_order}
+                onChange={(e) => setForm((f) => ({ ...f, sort_order: parseInt(e.target.value) || 100 }))}
+              />
+            </div>
+            <div className="flex items-end">
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={form.active}
+                  onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))}
+                />
+                Active
+              </label>
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="label mb-0">Output Contract</label>
+              <span className="text-xs text-gray-400">{form.output_contract.length.toLocaleString()} chars</span>
+            </div>
+            <textarea
+              className="input font-mono text-xs leading-relaxed resize-y"
+              rows={14}
+              value={form.output_contract}
+              onChange={(e) => setForm((f) => ({ ...f, output_contract: e.target.value }))}
+              placeholder="=== OUTPUT CONTRACT === ..."
+            />
+          </div>
+          <div className="flex gap-2 pt-2">
+            <button
+              onClick={handleSave}
+              disabled={saving || !form.key || !form.label || !form.output_contract}
+              className="btn-primary flex-1 justify-center"
+            >
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {editing ? 'Save Changes' : 'Create Template'}
+            </button>
+            <button onClick={() => setOpen(false)} className="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export function AdminPage() {
@@ -627,6 +831,7 @@ export function AdminPage() {
         <CustomersSection toast={toast} />
         <PromptsSection toast={toast} />
         <ModelsSection toast={toast} />
+        <ReportTemplatesSection toast={toast} />
       </div>
 
       <ToastStack toasts={toasts} />

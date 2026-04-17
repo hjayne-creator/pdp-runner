@@ -3,13 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from database import engine
+from database import engine, ensure_schema
 import models
-from routers import customers, prompts, ai_models, jobs
+from routers import customers, prompts, ai_models, jobs, report_templates
 from seed import seed
 
 # Create tables
 models.Base.metadata.create_all(bind=engine)
+ensure_schema()
 
 # Seed initial data
 seed()
@@ -48,6 +49,7 @@ app.include_router(customers.router, prefix="/api")
 app.include_router(prompts.router, prefix="/api")
 app.include_router(ai_models.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.include_router(report_templates.router, prefix="/api")
 
 
 @app.get("/api/health")

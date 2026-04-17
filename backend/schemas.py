@@ -104,6 +104,39 @@ class AIModelOut(AIModelBase):
         from_attributes = True
 
 
+# ── Report Templates ───────────────────────────────────────────────────────────
+
+class ReportTemplateBase(BaseModel):
+    key: str
+    label: str
+    description: Optional[str] = None
+    output_contract: str
+    active: bool = True
+    sort_order: int = 100
+
+
+class ReportTemplateCreate(ReportTemplateBase):
+    pass
+
+
+class ReportTemplateUpdate(BaseModel):
+    key: Optional[str] = None
+    label: Optional[str] = None
+    description: Optional[str] = None
+    output_contract: Optional[str] = None
+    active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class ReportTemplateOut(ReportTemplateBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # ── Job ───────────────────────────────────────────────────────────────────────
 
 class JobCreate(BaseModel):
@@ -111,6 +144,7 @@ class JobCreate(BaseModel):
     prompt_id: str
     model_id: str
     input_url: str
+    report_template: str = "pdp-audit-v1"
 
 
 class JobOut(BaseModel):
@@ -118,6 +152,7 @@ class JobOut(BaseModel):
     customer_id: str
     prompt_id: str
     model_id: str
+    report_template: str = "pdp-audit-v1"
     input_url: str
     pdp_data: Optional[Dict[str, Any]] = None
     prompt_rendered: Optional[str] = None

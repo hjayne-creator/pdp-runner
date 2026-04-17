@@ -7,9 +7,8 @@ import {
 import { clsx } from 'clsx';
 import { api } from '../api/client';
 import type { Job } from '../api/types';
-import { parseReport } from '../utils/report';
 import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
-import { ReportView } from '../components/ReportView';
+import { getKnownReportTemplate } from '../utils/reportTemplates';
 
 function StatusBadge({ status }: { status: Job['status'] }) {
   if (status === 'completed') return <span className="badge-green gap-1"><CheckCircle2 className="w-3 h-3" />Completed</span>;
@@ -164,11 +163,12 @@ export function HistoryDetailPage() {
   );
 
   const TABS = [
-    { id: 'output', label: 'AI Output' },
+    { id: 'output', label: 'Report' },
     { id: 'prompt', label: 'Rendered Prompt' },
     { id: 'pdp', label: 'PDP Data' },
   ] as const;
-  const parsedReport = parseReport(job.output ?? "");
+  const template = getKnownReportTemplate(job.report_template);
+  const parsedReport = template ? template.parse(job.output ?? '') : null;
 
   return (
     <div className="max-w-screen-xl mx-auto px-4 sm:px-6 py-6">
@@ -255,7 +255,7 @@ export function HistoryDetailPage() {
                   type="button"
                   onClick={downloadOutputPdf}
                   className="btn-secondary text-xs px-2.5 py-1.5"
-                  title="Download AI output as PDF"
+                  title="Download report as PDF"
                 >
                   <FileDown className="w-3 h-3" />
                   PDF
@@ -268,8 +268,8 @@ export function HistoryDetailPage() {
         <div className="p-5 overflow-auto max-h-[60vh]">
           {tab === 'output' && (
             <div ref={outputPdfRef} className="bg-white rounded-lg p-4">
-              {parsedReport ? (
-                <ReportView report={parsedReport} />
+              {template && parsedReport ? (
+                <>{template.render(parsedReport)}</>
               ) : (
                 <pre className="output-prose text-sm text-gray-800 whitespace-pre-wrap">
                   {job.output || <span className="text-gray-400 italic">No output</span>}

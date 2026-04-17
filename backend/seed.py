@@ -1,6 +1,7 @@
 """Seed the database with initial data."""
 from database import SessionLocal, engine
 import models
+from services.report_templates import REPORT_TEMPLATES
 
 JAMECO_PROMPT = """You are a senior technical eCommerce content editor for Jameco.
 
@@ -212,6 +213,31 @@ def seed():
     db = SessionLocal()
 
     try:
+        # ── Report Templates ───────────────────────────────────────────────────
+        if not db.query(models.ReportTemplate).first():
+            templates = [
+                models.ReportTemplate(
+                    key="pdp-audit-v1",
+                    label="PDP Audit (Detailed)",
+                    description="Full audit with cleanup fixes, parametric updates, and revised overview copy.",
+                    output_contract=REPORT_TEMPLATES["pdp-audit-v1"],
+                    active=True,
+                    sort_order=10,
+                ),
+                models.ReportTemplate(
+                    key="pdp-quick-brief-v1",
+                    label="PDP Quick Brief",
+                    description="Compact summary with risk level, top issues, and top opportunities.",
+                    output_contract=REPORT_TEMPLATES["pdp-quick-brief-v1"],
+                    active=True,
+                    sort_order=20,
+                ),
+            ]
+            for template in templates:
+                db.add(template)
+            db.commit()
+            print("✓ Seeded report templates")
+
         # ── AI Models ─────────────────────────────────────────────────────────
         if not db.query(models.AIModel).first():
             ai_models = [

@@ -1,5 +1,5 @@
 import type {
-  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent,
+  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent, ReportTemplate,
 } from './types';
 
 const BASE = '/api';
@@ -115,5 +115,18 @@ export const api = {
         }
       }
     },
+  },
+
+  // ── Report Templates ──────────────────────────────────────────────────────────
+  reportTemplates: {
+    list: (activeOnly = true) =>
+      req<ReportTemplate[]>(`/report-templates/?active_only=${activeOnly ? 'true' : 'false'}`),
+    get: (id: string) => req<ReportTemplate>(`/report-templates/${id}`),
+    create: (body: Omit<ReportTemplate, 'id' | 'created_at' | 'updated_at'>) =>
+      req<ReportTemplate>('/report-templates/', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: Partial<ReportTemplate>) =>
+      req<ReportTemplate>(`/report-templates/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    delete: (id: string) =>
+      req<{ ok: boolean }>(`/report-templates/${id}`, { method: 'DELETE' }),
   },
 };

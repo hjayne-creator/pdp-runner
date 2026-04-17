@@ -72,6 +72,7 @@ class Job(Base):
     customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
     prompt_id = Column(String, ForeignKey("prompts.id"), nullable=False)
     model_id = Column(String, ForeignKey("ai_models.id"), nullable=False)
+    report_template = Column(String, nullable=False, default="pdp-audit-v1")
 
     input_url = Column(String, nullable=False)
     pdp_data = Column(JSON, nullable=True)  # extracted PDP content
@@ -89,3 +90,17 @@ class Job(Base):
     customer = relationship("Customer", back_populates="jobs")
     prompt = relationship("Prompt", back_populates="jobs")
     model = relationship("AIModel", back_populates="jobs")
+
+
+class ReportTemplate(Base):
+    __tablename__ = "report_templates"
+
+    id = Column(String, primary_key=True, default=generate_id)
+    key = Column(String, nullable=False, unique=True)
+    label = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    output_contract = Column(Text, nullable=False)
+    active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=100)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

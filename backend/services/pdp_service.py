@@ -12,6 +12,7 @@ from typing import Any, Optional, cast
 
 import httpx
 from bs4 import BeautifulSoup
+from services.report_templates import get_output_contract
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +284,25 @@ def pdp_is_actionable(data: dict) -> bool:
     return len(raw) > 400
 
 
-def blocked_analysis_json(reason: str) -> str:
+def blocked_analysis_json(reason: str, report_template: str = "pdp-audit-v1") -> str:
     """Valid JSON matching the prompt output contract when the PDP cannot be loaded."""
+    if report_template == "pdp-quick-brief-v1":
+        quick_payload = {
+            "executive_summary": "Unable to generate a complete brief because the PDP could not be loaded.",
+            "risk_level": "High",
+            "top_issues": [
+                {
+                    "issue": "PDP source unavailable",
+                    "impact": reason,
+                    "recommended_action": "Retry with a reachable product URL or provide alternate source documents.",
+                }
+            ],
+            "top_opportunities": [],
+            "publish_readiness": "Blocked",
+            "sources": [],
+        }
+        return json.dumps(quick_payload, indent=2)
+
     payload = {
         "product_summary": {
             "manufacturer": "",
@@ -545,7 +563,13 @@ async def _fetch_with_playwright(url: str) -> dict:
         }
 
 
-def render_prompt(prompt_template: str, pdp_data: dict, url: str) -> str:
+def render_prompt(
+    prompt_template: str,
+    pdp_data: dict,
+    url: str,
+    report_template: str,
+    db: Any = None,
+) -> str:
     """Replace template variables in a prompt with PDP data."""
     # Build a rich context block
     attrs_text = ""
@@ -588,50 +612,13 @@ Additional Page Content:
     if context not in rendered:
         rendered = rendered + f"\n\n{context}"
 
-    # Add a deterministic output contract so a separate formatter step can
-    # reliably render a clean HTML report from model output.
-    rendered += """
-
-=== OUTPUT CONTRACT ===
-Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shape:
-{
-  "product_summary": {
-    "manufacturer": "string",
-    "manufacturer_part_number": "string",
-    "product_type": "string",
-    "revision_assessment": "Light|Medium|Heavy with one sentence"
-  },
-  "accuracy_cleanup_fixes": [
-    {
-      "current_issue": "string",
-      "correction": "string",
-      "evidence_source": "url or source note"
-    }
-  ],
-  "parametric_updates": [
-    {
-      "field": "string",
-      "current_value": "string",
-      "corrected_or_added_value": "string",
-      "source": "url or source note",
-      "confidence": "High|Medium|Low"
-    }
-  ],
-  "recommended_new_content_blocks": [
-    {
-      "block_title": "string",
-      "why_it_helps": "string",
-      "source_basis": "string",
-      "proposed_block_copy": "string"
-    }
-  ],
-  "revised_overview_copy": "string",
-  "final_publishing_recommendation": "Publish after light edit|Publish after human review|Do not publish until source conflict is resolved",
-  "sources": ["https://..."]
-}
-If there are no new content blocks, return:
-"recommended_new_content_blocks": ["No new content blocks recommended"]
-=== END OUTPUT CONTRACT ===
-"""
+    # Output contract: from DB (report_templates.output_contract) when present,
+    # else built-in REPORT_TEMPLATES fallback. Use {{OUTPUT_CONTRACT}} in the
+    # prompt to inject once; otherwise it is appended so older prompts keep working.
+    contract = get_output_contract(report_template, db).strip()
+    if "{{OUTPUT_CONTRACT}}" in rendered:
+        rendered = rendered.replace("{{OUTPUT_CONTRACT}}", contract)
+    else:
+        rendered += f"\n\n{contract}"
 
     return rendered
