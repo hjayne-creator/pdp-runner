@@ -24,19 +24,16 @@ export async function downloadHtmlElementAsPdf(
   const margin = 36;
   const imgWidth = pdfPageWidth - 2 * margin;
   const imgHeight = (canvas.height * imgWidth) / canvas.width;
-  const usablePageHeight = pdfPageHeight - 2 * margin;
+  /** Vertical slice height per page (content between top/bottom margins). */
+  const sliceHeight = pdfPageHeight - 2 * margin;
 
-  let heightLeft = imgHeight;
-  let position = margin;
-
-  pdf.addImage(imgData, 'JPEG', margin, position, imgWidth, imgHeight);
-  heightLeft -= usablePageHeight;
-
-  while (heightLeft > 0) {
-    position = heightLeft - imgHeight + margin;
-    pdf.addPage();
-    pdf.addImage(imgData, 'JPEG', margin, position, imgWidth, imgHeight);
-    heightLeft -= usablePageHeight;
+  // One bitmap is shifted up by `offset` each page so the next slice sits in [margin, margin+sliceHeight].
+  let offset = 0;
+  while (offset < imgHeight) {
+    if (offset > 0) pdf.addPage();
+    const y = margin - offset;
+    pdf.addImage(imgData, 'JPEG', margin, y, imgWidth, imgHeight);
+    offset += sliceHeight;
   }
 
   const safe = filenameBase.replace(/[^\w\-]+/g, '_').replace(/_+/g, '_').slice(0, 120);
