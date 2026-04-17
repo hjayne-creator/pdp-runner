@@ -4,12 +4,16 @@ Attempts a lightweight httpx fetch first; falls back to Playwright
 for JavaScript-heavy pages; optionally uses Firecrawl when local scraping
 fails (e.g. aggressive bot protection on shared hosting IPs).
 """
+import json
+import logging
 import os
 import re
-import json
-from typing import Optional
+from typing import Any, Optional, cast
+
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 # Interstitials (Cloudflare, etc.) often return HTTP 200 with a non-empty title,
@@ -23,8 +27,34 @@ _CHALLENGE_TITLE_RE = re.compile(
 )
 
 
+def _normalize_pdp_url(url: str) -> str:
+    """Ensure scheme so httpx / Firecrawl / Playwright receive absolute URLs."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    if not re.match(r"^https?://", u, re.I):
+        u = f"https://{u}"
+    return u
+
+
+def _looks_like_real_product(data: dict) -> bool:
+    """Strong PDP signals — do not treat as a bot wall (avoids Cloudflare footer false positives)."""
+    price = str(data.get("price") or "")
+    if re.search(r"\d", price):
+        return True
+    if len(data.get("attributes") or {}) >= 2:
+        return True
+    imgs = data.get("images") or []
+    title = (data.get("title") or "").strip()
+    if len(imgs) > 0 and len(title) > 24:
+        return True
+    return False
+
+
 def _is_bot_challenge_page(data: dict) -> bool:
     """True when parsed fields look like a bot/WAF interstitial, not a real PDP."""
+    if _looks_like_real_product(data):
+        return False
     title = (data.get("title") or "").strip()
     if title and _CHALLENGE_TITLE_RE.search(title):
         return True
@@ -276,9 +306,20 @@ def blocked_analysis_json(reason: str) -> str:
 
 async def fetch_pdp(url: str) -> dict:
     """Fetch and parse a PDP URL. Returns structured data dict."""
+    url = _normalize_pdp_url(url)
     data = await _fetch_pdp_local(url)
     data = await _try_firecrawl_fallback(url, data)
-    return _sanitize_blocked_pdp(url, data)
+    out = _sanitize_blocked_pdp(url, data)
+    key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+    if _is_bot_challenge_page(data) and not key:
+        hint = (
+            " Set FIRECRAWL_API_KEY on the server to enable the Firecrawl fallback."
+        )
+        if out.get("error") and hint not in out["error"]:
+            out = {**out, "error": out["error"] + hint}
+        elif not out.get("error"):
+            out = {**out, "error": hint.strip()}
+    return out
 
 
 async def _fetch_pdp_local(url: str) -> dict:
@@ -354,10 +395,63 @@ async def _try_firecrawl_fallback(url: str, data: dict) -> dict:
     return data
 
 
+def _metadata_title_description(doc: Any) -> tuple[str, str]:
+    """Read title/description from Firecrawl Document metadata (snake_case or camelCase)."""
+    meta: dict[str, Any] = {}
+    try:
+        meta = cast(dict[str, Any], doc.metadata_dict)
+    except Exception:
+        pass
+    if not meta:
+        md = getattr(doc, "metadata", None)
+        if isinstance(md, dict):
+            meta = md
+        elif md is not None and hasattr(md, "model_dump"):
+            meta = md.model_dump()
+
+    def _one(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, list):
+            val = val[0] if val else ""
+        return _clean_text(str(val))
+
+    title = _one(
+        meta.get("title")
+        or meta.get("ogTitle")
+        or meta.get("og_title")
+    )[:500]
+    description = _one(
+        meta.get("description")
+        or meta.get("ogDescription")
+        or meta.get("og_description")
+    )[:2000]
+    return title, description
+
+
+def _pdp_from_firecrawl_document(url: str, doc: Any) -> dict:
+    """Firecrawl sometimes returns markdown without HTML; still produce PDP context."""
+    md = (getattr(doc, "markdown", None) or "").strip()
+    title, description = _metadata_title_description(doc)
+    if not title and md:
+        title = _clean_text(md.split("\n", 1)[0])[:500]
+    raw_text = _clean_text(md)[:6000] if md else ""
+    return {
+        "url": url,
+        "title": title,
+        "description": description,
+        "price": "",
+        "attributes": {},
+        "images": [],
+        "raw_text": raw_text,
+        "error": None,
+    }
+
+
 async def _fetch_with_firecrawl(url: str, api_key: str) -> dict:
     """
     Remote scrape via official Firecrawl Python SDK (AsyncFirecrawl).
-    rawHtml keeps JSON-LD in script tags; the SDK exposes it as raw_html.
+    Prefer raw_html (keeps JSON-LD); fall back to html, then markdown + metadata.
     See https://docs.firecrawl.dev/sdks/python
     """
     try:
@@ -387,18 +481,29 @@ async def _fetch_with_firecrawl(url: str, api_key: str) -> dict:
 
     try:
         client = AsyncFirecrawl(api_key=api_key, timeout=125.0)
+        logger.info("pdp.firecrawl: scrape start url=%s", url)
         doc = await client.scrape(
             url,
-            formats=["rawHtml"],
+            formats=["rawHtml", "html", "markdown"],
             only_main_content=False,
+            max_age=172800000,
             proxy="auto",
             timeout=120000,
         )
         html = (doc.raw_html or doc.html or "").strip()
-        if not html:
-            return {**empty, "error": "Firecrawl: empty HTML in response"}
-        return _parse_html(url, html)
+        if html:
+            logger.info(
+                "pdp.firecrawl: ok html url=%s bytes=%s", url, len(html.encode("utf-8"))
+            )
+            return _parse_html(url, html)
+        md = (getattr(doc, "markdown", None) or "").strip()
+        if md:
+            logger.info("pdp.firecrawl: ok markdown-only url=%s", url)
+            return _pdp_from_firecrawl_document(url, doc)
+        logger.warning("pdp.firecrawl: empty html+markdown url=%s", url)
+        return {**empty, "error": "Firecrawl: empty HTML and markdown in response"}
     except Exception as exc:
+        logger.warning("pdp.firecrawl: failed url=%s err=%s", url, exc)
         return {**empty, "error": f"Firecrawl: {exc}"}
 
 
