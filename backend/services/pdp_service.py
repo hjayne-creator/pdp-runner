@@ -12,6 +12,50 @@ import httpx
 from bs4 import BeautifulSoup
 
 
+# Interstitials (Cloudflare, etc.) often return HTTP 200 with a non-empty title,
+# which used to skip Playwright/Firecrawl and let the model echo block copy in JSON.
+_CHALLENGE_TITLE_RE = re.compile(
+    r"just\s+a\s+moment|attention\s+required|please\s+wait(?:\.\.\.)?|"
+    r"verify\s+you\s+are\s+human|access\s+denied|bot\s+protection|"
+    r"ddos\s+protection\s+by|checking\s+your\s+browser|"
+    r"the\s+request\s+could\s+not\s+be\s+satisfied",
+    re.I,
+)
+
+
+def _is_bot_challenge_page(data: dict) -> bool:
+    """True when parsed fields look like a bot/WAF interstitial, not a real PDP."""
+    title = (data.get("title") or "").strip()
+    if title and _CHALLENGE_TITLE_RE.search(title):
+        return True
+    raw = (data.get("raw_text") or "").lower()
+    desc = (data.get("description") or "").lower()
+    blob = f"{raw} {desc}"
+    if "incapsula" in blob and "incident id" in blob:
+        return True
+    if "cloudflare" in blob or "cf-error" in blob:
+        return any(
+            marker in blob
+            for marker in (
+                "ray id",
+                "checking your browser",
+                "security block",
+                "could not be retrieved",
+                "turnstile",
+                "just a moment",
+                "activate and hold",
+                "you have been blocked",
+                "sorry, you have been blocked",
+                "enable javascript and cookies",
+                "ddos protection by",
+                "why have i been blocked",
+                "cloudflare security block",
+                "due to a cloudflare",
+            )
+        )
+    return False
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -177,10 +221,64 @@ def _has_useful_pdp_content(data: dict) -> bool:
     return bool(data.get("title")) or len(data.get("attributes") or {}) > 0
 
 
+def _sanitize_blocked_pdp(url: str, data: dict) -> dict:
+    """Strip misleading interstitial text so prompts/models do not ingest it."""
+    if not _is_bot_challenge_page(data):
+        return data
+    err = data.get("error") or (
+        "Product page appears to be a bot-protection screen (e.g. Cloudflare) "
+        "rather than real product content."
+    )
+    return {
+        "url": url,
+        "title": None,
+        "description": None,
+        "price": None,
+        "attributes": {},
+        "images": [],
+        "raw_text": None,
+        "error": err,
+    }
+
+
+def pdp_is_actionable(data: dict) -> bool:
+    """False when we should not call the LLM (no real PDP context)."""
+    if data.get("error"):
+        return False
+    if _is_bot_challenge_page(data):
+        return False
+    if _has_useful_pdp_content(data):
+        return True
+    raw = data.get("raw_text") or ""
+    return len(raw) > 400
+
+
+def blocked_analysis_json(reason: str) -> str:
+    """Valid JSON matching the prompt output contract when the PDP cannot be loaded."""
+    payload = {
+        "product_summary": {
+            "manufacturer": "",
+            "manufacturer_part_number": "",
+            "product_type": "",
+            "revision_assessment": reason,
+        },
+        "accuracy_cleanup_fixes": [],
+        "parametric_updates": [],
+        "recommended_new_content_blocks": ["No new content blocks recommended"],
+        "revised_overview_copy": "",
+        "final_publishing_recommendation": (
+            "Do not publish until source conflict is resolved"
+        ),
+        "sources": [],
+    }
+    return json.dumps(payload, indent=2)
+
+
 async def fetch_pdp(url: str) -> dict:
     """Fetch and parse a PDP URL. Returns structured data dict."""
     data = await _fetch_pdp_local(url)
-    return await _try_firecrawl_fallback(url, data)
+    data = await _try_firecrawl_fallback(url, data)
+    return _sanitize_blocked_pdp(url, data)
 
 
 async def _fetch_pdp_local(url: str) -> dict:
@@ -203,8 +301,8 @@ async def _fetch_pdp_local(url: str) -> dict:
 
         data = _parse_html(url, html)
 
-        # If we got almost nothing useful, try playwright
-        if not _has_useful_pdp_content(data):
+        # Empty PDP or bot/WAF interstitial (often HTTP 200): try headless render.
+        if not _has_useful_pdp_content(data) or _is_bot_challenge_page(data):
             data = await _fetch_with_playwright(url)
 
         return data
@@ -235,7 +333,12 @@ async def _try_firecrawl_fallback(url: str, data: dict) -> dict:
     key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
     if not key:
         return data
-    if not data.get("error") and _has_useful_pdp_content(data):
+    needs_firecrawl = (
+        bool(data.get("error"))
+        or not _has_useful_pdp_content(data)
+        or _is_bot_challenge_page(data)
+    )
+    if not needs_firecrawl:
         return data
 
     fc = await _fetch_with_firecrawl(url, key)

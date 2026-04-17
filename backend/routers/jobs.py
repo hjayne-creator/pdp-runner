@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 import models, schemas
-from services.pdp_service import fetch_pdp, render_prompt
+from services.pdp_service import (
+    blocked_analysis_json,
+    fetch_pdp,
+    pdp_is_actionable,
+    render_prompt,
+)
 from services.ai_service import run_ai_stream
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -115,6 +120,8 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         start_ms = int(time.time() * 1000)
         output_chunks: list[str] = []
         error_msg: Optional[str] = None
+        pdp_data: Optional[dict] = None
+        rendered: Optional[str] = None
 
         try:
             # 1. Fetch PDP
@@ -125,21 +132,31 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                 warn_msg = f"PDP fetch warning: {pdp_data['error']}"
                 yield f"data: {json.dumps({'type': 'warning', 'message': warn_msg})}\n\n"
 
-            # 2. Render prompt
+            # 2. Render prompt (stored for history even if we skip the model)
             yield f"data: {json.dumps({'type': 'status', 'message': 'Rendering prompt...'})}\n\n"
             rendered = render_prompt(prompt_content, pdp_data, body.input_url)
 
-            # 3. Stream AI
-            yield f"data: {json.dumps({'type': 'status', 'message': f'Running {model_display_name}...'})}\n\n"
-            async for chunk in run_ai_stream(
-                provider=model_provider,
-                model_id=model_model_id,
-                prompt=rendered,
-                max_tokens=model_max_tokens,
-                config=model_config,
-            ):
-                output_chunks.append(chunk)
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+            if not pdp_is_actionable(pdp_data):
+                reason = (
+                    pdp_data.get("error")
+                    or "The product URL did not return usable page content after automatic retries."
+                )
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Skipping model: no usable PDP content (blocked or empty).'})}\n\n"
+                blocked = blocked_analysis_json(reason)
+                output_chunks.append(blocked)
+                yield f"data: {json.dumps({'type': 'token', 'content': blocked})}\n\n"
+            else:
+                # 3. Stream AI
+                yield f"data: {json.dumps({'type': 'status', 'message': f'Running {model_display_name}...'})}\n\n"
+                async for chunk in run_ai_stream(
+                    provider=model_provider,
+                    model_id=model_model_id,
+                    prompt=rendered,
+                    max_tokens=model_max_tokens,
+                    config=model_config,
+                ):
+                    output_chunks.append(chunk)
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
 
         except Exception as exc:
             error_msg = str(exc)
@@ -157,8 +174,8 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                 final_job = write_db.query(models.Job).filter(models.Job.id == job_id).first()
                 if final_job:
                     final_job.output = full_output
-                    final_job.pdp_data = pdp_data if 'pdp_data' in dir() else None
-                    final_job.prompt_rendered = rendered if 'rendered' in dir() else None
+                    final_job.pdp_data = pdp_data
+                    final_job.prompt_rendered = rendered
                     final_job.status = "failed" if error_msg else "completed"
                     final_job.error = error_msg
                     final_job.duration_ms = duration_ms
