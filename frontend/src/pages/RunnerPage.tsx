@@ -2,12 +2,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Zap, Globe, ChevronDown, Play, Square, RotateCcw, Copy, Check,
-  Clock, AlertCircle, CheckCircle2, Loader2, ExternalLink,
+  Clock, AlertCircle, CheckCircle2, Loader2, ExternalLink, FileDown,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
 import type { Customer, Prompt, AIModel, SSEEvent } from '../api/types';
 import { parseReport } from '../utils/report';
+import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
 import { ReportView } from '../components/ReportView';
 
 type Status = 'idle' | 'fetching' | 'running' | 'done' | 'error';
@@ -35,6 +36,7 @@ export function RunnerPage() {
   const [copied, setCopied] = useState(false);
 
   const outputRef = useRef<HTMLDivElement>(null);
+  const pdfContentRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Load customers + models
@@ -117,6 +119,16 @@ export function RunnerPage() {
     navigator.clipboard.writeText(output);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!pdfContentRef.current) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    try {
+      await downloadHtmlElementAsPdf(pdfContentRef.current, `ai-output-report_${stamp}`);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const handleReset = () => {
@@ -328,10 +340,21 @@ export function RunnerPage() {
                 </Link>
               )}
               {output && (
-                <button onClick={handleCopy} className="btn-secondary text-xs px-2.5 py-1.5">
-                  {copied ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
-                  {copied ? 'Copied' : 'Copy'}
-                </button>
+                <>
+                  <button onClick={handleCopy} className="btn-secondary text-xs px-2.5 py-1.5">
+                    {copied ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadPdf}
+                    className="btn-secondary text-xs px-2.5 py-1.5"
+                    title="Download AI output as PDF"
+                  >
+                    <FileDown className="w-3 h-3" />
+                    PDF
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -363,18 +386,20 @@ export function RunnerPage() {
             )}
 
             {output && (
-              parsedReport && status !== 'running' ? (
-                <ReportView report={parsedReport} />
-              ) : (
-                <div
-                  className={clsx(
-                    'output-prose text-sm text-gray-800',
-                    status === 'running' && 'cursor-blink',
-                  )}
-                >
-                  {output}
-                </div>
-              )
+              <div ref={pdfContentRef} className="bg-white rounded-lg p-4 shadow-sm">
+                {parsedReport && status !== 'running' ? (
+                  <ReportView report={parsedReport} />
+                ) : (
+                  <div
+                    className={clsx(
+                      'output-prose text-sm text-gray-800',
+                      status === 'running' && 'cursor-blink',
+                    )}
+                  >
+                    {output}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

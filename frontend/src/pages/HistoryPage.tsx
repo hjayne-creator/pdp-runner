@@ -1,13 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   History, ChevronRight, Trash2, ExternalLink, Clock, CheckCircle2,
-  AlertCircle, Loader2, ArrowLeft, Copy, Check,
+  AlertCircle, Loader2, ArrowLeft, Copy, Check, FileDown,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
 import type { Job } from '../api/types';
 import { parseReport } from '../utils/report';
+import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
 import { ReportView } from '../components/ReportView';
 
 function StatusBadge({ status }: { status: Job['status'] }) {
@@ -126,6 +127,7 @@ export function HistoryDetailPage() {
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<'output' | 'prompt' | null>(null);
   const [tab, setTab] = useState<'output' | 'prompt' | 'pdp'>('output');
+  const outputPdfRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!jobId) return;
@@ -138,6 +140,15 @@ export function HistoryDetailPage() {
     navigator.clipboard.writeText(text);
     setCopied(which);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  const downloadOutputPdf = async () => {
+    if (!job?.output?.trim() || !outputPdfRef.current) return;
+    try {
+      await downloadHtmlElementAsPdf(outputPdfRef.current, `ai-output-report_${job.id}`);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   if (loading) return (
@@ -234,22 +245,37 @@ export function HistoryDetailPage() {
             {TABS.find((t) => t.id === tab)?.label}
           </span>
           {(tab === 'output' || tab === 'prompt') && (
-            <button onClick={() => copy(tab as 'output' | 'prompt')} className="btn-secondary text-xs px-2.5 py-1.5">
-              {copied === tab ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
-              {copied === tab ? 'Copied' : 'Copy'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => copy(tab as 'output' | 'prompt')} className="btn-secondary text-xs px-2.5 py-1.5">
+                {copied === tab ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
+                {copied === tab ? 'Copied' : 'Copy'}
+              </button>
+              {tab === 'output' && job.output?.trim() && (
+                <button
+                  type="button"
+                  onClick={downloadOutputPdf}
+                  className="btn-secondary text-xs px-2.5 py-1.5"
+                  title="Download AI output as PDF"
+                >
+                  <FileDown className="w-3 h-3" />
+                  PDF
+                </button>
+              )}
+            </div>
           )}
         </div>
 
         <div className="p-5 overflow-auto max-h-[60vh]">
           {tab === 'output' && (
-            parsedReport ? (
-              <ReportView report={parsedReport} />
-            ) : (
-              <pre className="output-prose text-sm text-gray-800 whitespace-pre-wrap">
-                {job.output || <span className="text-gray-400 italic">No output</span>}
-              </pre>
-            )
+            <div ref={outputPdfRef} className="bg-white rounded-lg p-4">
+              {parsedReport ? (
+                <ReportView report={parsedReport} />
+              ) : (
+                <pre className="output-prose text-sm text-gray-800 whitespace-pre-wrap">
+                  {job.output || <span className="text-gray-400 italic">No output</span>}
+                </pre>
+              )}
+            </div>
           )}
           {tab === 'prompt' && (
             <pre className="text-xs text-gray-700 font-mono whitespace-pre-wrap leading-relaxed">
