@@ -9,7 +9,7 @@ Run AI prompts against eCommerce Product Detail Pages. Built for DynEcom's PDP a
 | Backend | FastAPI + SQLite (SQLAlchemy) |
 | Frontend | React + TypeScript + Vite + Tailwind CSS |
 | AI | OpenAI + Anthropic (streaming SSE) |
-| Scraping | httpx + BeautifulSoup + Playwright fallback |
+| Scraping | httpx + BeautifulSoup + Playwright fallback + optional Firecrawl |
 
 ---
 
@@ -30,7 +30,8 @@ playwright install chromium
 
 # Configure API keys
 cp .env.example .env
-# Edit .env with your OPENAI_API_KEY and/or ANTHROPIC_API_KEY
+# Edit .env: OPENAI_API_KEY / ANTHROPIC_API_KEY; optional FIRECRAWL_API_KEY
+# (scrape fallback uses the official firecrawl-py SDK — see docs.firecrawl.dev/sdks/python)
 
 # Start server (auto-seeds DB on first run)
 uvicorn main:app --reload --port 8000

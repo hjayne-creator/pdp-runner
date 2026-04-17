@@ -1,8 +1,10 @@
 """
 PDP scraping service.
 Attempts a lightweight httpx fetch first; falls back to Playwright
-for JavaScript-heavy pages.
+for JavaScript-heavy pages; optionally uses Firecrawl when local scraping
+fails (e.g. aggressive bot protection on shared hosting IPs).
 """
+import os
 import re
 import json
 from typing import Optional
@@ -171,8 +173,18 @@ def _parse_html(url: str, html: str) -> dict:
     }
 
 
+def _has_useful_pdp_content(data: dict) -> bool:
+    return bool(data.get("title")) or len(data.get("attributes") or {}) > 0
+
+
 async def fetch_pdp(url: str) -> dict:
     """Fetch and parse a PDP URL. Returns structured data dict."""
+    data = await _fetch_pdp_local(url)
+    return await _try_firecrawl_fallback(url, data)
+
+
+async def _fetch_pdp_local(url: str) -> dict:
+    """httpx + BeautifulSoup, then Playwright when blocked or empty."""
     try:
         async with httpx.AsyncClient(
             headers=HEADERS,
@@ -192,13 +204,62 @@ async def fetch_pdp(url: str) -> dict:
         data = _parse_html(url, html)
 
         # If we got almost nothing useful, try playwright
-        has_content = bool(data["title"]) or len(data["attributes"]) > 0
-        if not has_content:
+        if not _has_useful_pdp_content(data):
             data = await _fetch_with_playwright(url)
 
         return data
 
     except Exception as exc:
+        pw = await _fetch_with_playwright(url)
+        if pw.get("error"):
+            base = {
+                "url": url,
+                "title": None,
+                "description": None,
+                "price": None,
+                "attributes": {},
+                "images": [],
+                "raw_text": None,
+                "error": str(exc),
+            }
+            base["error"] = f"{exc}; {pw['error']}"
+            return base
+        return pw
+
+
+async def _try_firecrawl_fallback(url: str, data: dict) -> dict:
+    """
+    If FIRECRAWL_API_KEY is set and local scrape failed or returned no PDP
+    signals, request rendered HTML from Firecrawl and re-parse.
+    """
+    key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+    if not key:
+        return data
+    if not data.get("error") and _has_useful_pdp_content(data):
+        return data
+
+    fc = await _fetch_with_firecrawl(url, key)
+    if not fc.get("error") and (
+        _has_useful_pdp_content(fc)
+        or (fc.get("raw_text") and len(fc["raw_text"]) > 200)
+    ):
+        return fc
+
+    parts = [p for p in (data.get("error"), fc.get("error")) if p]
+    if parts:
+        data = {**data, "error": " | ".join(parts)}
+    return data
+
+
+async def _fetch_with_firecrawl(url: str, api_key: str) -> dict:
+    """
+    Remote scrape via official Firecrawl Python SDK (AsyncFirecrawl).
+    rawHtml keeps JSON-LD in script tags; the SDK exposes it as raw_html.
+    See https://docs.firecrawl.dev/sdks/python
+    """
+    try:
+        from firecrawl import AsyncFirecrawl
+    except ImportError:
         return {
             "url": url,
             "title": None,
@@ -207,8 +268,35 @@ async def fetch_pdp(url: str) -> dict:
             "attributes": {},
             "images": [],
             "raw_text": None,
-            "error": str(exc),
+            "error": "Firecrawl: firecrawl-py is not installed",
         }
+
+    empty = {
+        "url": url,
+        "title": None,
+        "description": None,
+        "price": None,
+        "attributes": {},
+        "images": [],
+        "raw_text": None,
+        "error": None,
+    }
+
+    try:
+        client = AsyncFirecrawl(api_key=api_key, timeout=125.0)
+        doc = await client.scrape(
+            url,
+            formats=["rawHtml"],
+            only_main_content=False,
+            proxy="auto",
+            timeout=120000,
+        )
+        html = (doc.raw_html or doc.html or "").strip()
+        if not html:
+            return {**empty, "error": "Firecrawl: empty HTML in response"}
+        return _parse_html(url, html)
+    except Exception as exc:
+        return {**empty, "error": f"Firecrawl: {exc}"}
 
 
 async def _fetch_with_playwright(url: str) -> dict:

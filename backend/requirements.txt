@@ -13,3 +13,4 @@ pydantic==2.10.3
 pydantic-settings==2.6.1
 aiofiles==24.1.0
 playwright==1.49.1
+firecrawl-py==4.22.2
