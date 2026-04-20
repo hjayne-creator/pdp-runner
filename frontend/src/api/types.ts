@@ -36,12 +36,31 @@ export interface AIModel {
   updated_at: string;
 }
 
-export interface ReportTemplate {
+export type ProductWorkflow = 'retail' | 'house_brand';
+
+export interface OutputFormat {
   id: string;
   key: string;
   label: string;
   description?: string;
-  output_contract: string;
+  contract: string;
+  active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportType {
+  id: string;
+  key: string;
+  label: string;
+  description?: string;
+  workflow: ProductWorkflow | string;
+  icon?: string;
+  default_prompt_id?: string;
+  output_format_id?: string;
+  output_format?: OutputFormat;
+  requires_competitor_verification: boolean;
   active: boolean;
   sort_order: number;
   created_at: string;
@@ -53,9 +72,10 @@ export interface Job {
   customer_id: string;
   prompt_id: string;
   model_id: string;
-  report_template: string;
+  report_type_id?: string;
   input_url: string;
   pdp_data?: Record<string, unknown>;
+  competitor_verification?: Record<string, unknown>;
   prompt_rendered?: string;
   output?: string;
   output_tokens?: number;
@@ -68,6 +88,7 @@ export interface Job {
   customer?: Customer;
   prompt?: Prompt;
   model?: AIModel;
+  report_type?: ReportType;
 }
 
 export interface JobCreate {
@@ -75,7 +96,9 @@ export interface JobCreate {
   prompt_id: string;
   model_id: string;
   input_url: string;
-  report_template: string;
+  report_type_id?: string;
+  /** Omit/null ⇒ inherit from the report type's `requires_competitor_verification`. */
+  verify_competitors?: boolean | null;
 }
 
 export type SSEEvent =

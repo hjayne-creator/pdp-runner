@@ -1,18 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Zap, Globe, ChevronDown, Play, Square, RotateCcw, Copy, Check,
-  Clock, AlertCircle, CheckCircle2, Loader2, ExternalLink, FileDown,
+  Clock, AlertCircle, CheckCircle2, Loader2, ExternalLink, FileDown, X,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
-import type { Customer, Prompt, AIModel, SSEEvent, ReportTemplate } from '../api/types';
+import type { Prompt, AIModel, SSEEvent, ReportType } from '../api/types';
+import type { HomeToRunnerIntent, RunnerPrefillState } from '../utils/workflow';
 import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
-import {
-  getKnownReportTemplate,
-  listKnownReportTemplates,
-  DEFAULT_REPORT_TEMPLATE,
-} from '../utils/reportTemplates';
+import { getKnownReportTemplate } from '../utils/reportTemplates';
 
 type Status = 'idle' | 'fetching' | 'running' | 'done' | 'error';
 
@@ -21,17 +18,31 @@ interface StatusMsg {
   message: string;
 }
 
+interface HomeHandoff {
+  intent: HomeToRunnerIntent;
+  inputUrl: string;
+  reportLabel: string;
+  modelLabel: string;
+  dismissed: boolean;
+}
+
 export function RunnerPage() {
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const prefillAppliedRef = useRef(false);
+  const runBtnRef = useRef<HTMLButtonElement>(null);
+  const handoffFocusAppliedRef = useRef(false);
+
+  const [tenantCustomerId, setTenantCustomerId] = useState('');
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [models, setModels] = useState<AIModel[]>([]);
-  const [reportTemplates, setReportTemplates] = useState<ReportTemplate[]>([]);
+  const [reportTypes, setReportTypes] = useState<ReportType[]>([]);
 
   const [url, setUrl] = useState('');
-  const [customerId, setCustomerId] = useState('');
+  const [reportTypeId, setReportTypeId] = useState('');
   const [promptId, setPromptId] = useState('');
   const [modelId, setModelId] = useState('');
-  const [reportTemplate, setReportTemplate] = useState(DEFAULT_REPORT_TEMPLATE);
+  const [verifyOverride, setVerifyOverride] = useState<boolean | null>(null);
 
   const [status, setStatus] = useState<Status>('idle');
   const [statusMessages, setStatusMessages] = useState<StatusMsg[]>([]);
@@ -39,48 +50,136 @@ export function RunnerPage() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [durationMs, setDurationMs] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
+  const [homeHandoff, setHomeHandoff] = useState<HomeHandoff | null>(null);
 
   const outputRef = useRef<HTMLDivElement>(null);
   const pdfContentRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Load customers + models
   useEffect(() => {
-    api.customers.list().then(setCustomers).catch(console.error);
-    api.reportTemplates.list(true).then(setReportTemplates).catch(console.error);
-    api.models.list().then((ms) => {
-      setModels(ms);
-      if (ms.length > 0 && !modelId) setModelId(ms[0].id);
-    }).catch(console.error);
+    api.customers
+      .list()
+      .then((customers) => {
+        const id = customers[0]?.id ?? '';
+        setTenantCustomerId(id);
+      })
+      .catch(console.error);
+    api.reportTypes
+      .list({ activeOnly: true })
+      .then((rts) => {
+        setReportTypes(rts);
+        setReportTypeId((prev) => (prev && rts.some((rt) => rt.id === prev) ? prev : rts[0]?.id ?? ''));
+      })
+      .catch(console.error);
+    api.models
+      .list()
+      .then((ms) => {
+        setModels(ms);
+        if (ms.length > 0) setModelId((prev) => (prev && ms.some((m) => m.id === prev) ? prev : ms[0].id));
+      })
+      .catch(console.error);
   }, []);
 
-  // Load prompts when customer changes
   useEffect(() => {
-    if (!customerId) { setPrompts([]); setPromptId(''); return; }
-    api.prompts.list(customerId).then((ps) => {
-      setPrompts(ps);
-      if (ps.length > 0) setPromptId(ps[0].id);
-      else setPromptId('');
-    }).catch(console.error);
-  }, [customerId]);
+    api.prompts
+      .list()
+      .then((ps) => {
+        setPrompts(ps);
+      })
+      .catch(console.error);
+  }, []);
+
+  const selectedReportType = useMemo(
+    () => reportTypes.find((rt) => rt.id === reportTypeId) ?? null,
+    [reportTypes, reportTypeId],
+  );
+
+  // Default the prompt to the report type's default whenever the type changes,
+  // unless the user has explicitly chosen a prompt this session.
+  const promptManuallyChangedRef = useRef(false);
+  useEffect(() => {
+    if (promptManuallyChangedRef.current) return;
+    if (!selectedReportType) {
+      if (prompts.length > 0 && !promptId) setPromptId(prompts[0].id);
+      return;
+    }
+    if (selectedReportType.default_prompt_id) {
+      const exists = prompts.some((p) => p.id === selectedReportType.default_prompt_id);
+      if (exists) {
+        setPromptId(selectedReportType.default_prompt_id);
+        return;
+      }
+    }
+    if (prompts.length > 0 && !promptId) setPromptId(prompts[0].id);
+  }, [selectedReportType, prompts, promptId]);
+
+  // Apply Home → Runner prefill once
+  useEffect(() => {
+    const s = location.state as RunnerPrefillState | null;
+    if (!s?.fromHome || prefillAppliedRef.current) return;
+    if (s.modelId && models.length === 0) return;
+    if (s.promptId && prompts.length === 0) return;
+    if (s.reportTypeId && reportTypes.length === 0) return;
+
+    prefillAppliedRef.current = true;
+    if (s.inputUrl) setUrl(s.inputUrl);
+    if (s.modelId && models.some((m) => m.id === s.modelId)) setModelId(s.modelId);
+    if (s.reportTypeId && reportTypes.some((rt) => rt.id === s.reportTypeId)) {
+      setReportTypeId(s.reportTypeId);
+    }
+    if (s.promptId && prompts.some((p) => p.id === s.promptId)) {
+      promptManuallyChangedRef.current = true;
+      setPromptId(s.promptId);
+    }
+    if (typeof s.verifyCompetitors === 'boolean') setVerifyOverride(s.verifyCompetitors);
+
+    const intent: HomeToRunnerIntent = s.homeIntent ?? 'customize_first';
+    const rt = s.reportTypeId ? reportTypes.find((r) => r.id === s.reportTypeId) : undefined;
+    const md = s.modelId ? models.find((m) => m.id === s.modelId) : undefined;
+    setHomeHandoff({
+      intent,
+      inputUrl: (s.inputUrl ?? '').trim(),
+      reportLabel: rt?.label ?? 'Report type',
+      modelLabel: md?.display_name ?? 'Model',
+      dismissed: false,
+    });
+    handoffFocusAppliedRef.current = false;
+
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, location.pathname, navigate, models, prompts, reportTypes]);
 
   useEffect(() => {
-    if (reportTemplates.length === 0) return;
-    const exists = reportTemplates.some((template) => template.key === reportTemplate);
-    if (!exists) setReportTemplate(reportTemplates[0].key);
-  }, [reportTemplates, reportTemplate]);
+    const h = homeHandoff && !homeHandoff.dismissed ? homeHandoff : null;
+    if (!h || h.intent !== 'review_and_run') {
+      handoffFocusAppliedRef.current = false;
+      return;
+    }
+    if (status !== 'idle') return;
+    if (handoffFocusAppliedRef.current) return;
+    handoffFocusAppliedRef.current = true;
+    runBtnRef.current?.focus({ preventScroll: true });
+  }, [homeHandoff, status]);
 
-  // Auto-scroll output
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
   }, [output]);
 
-  const canRun = url.trim() && customerId && promptId && modelId && status !== 'running';
+  const selectedPrompt = prompts.find((p) => p.id === promptId);
+  const jobCustomerId = selectedPrompt?.customer_id ?? tenantCustomerId;
+
+  const verifyEffective = verifyOverride !== null
+    ? verifyOverride
+    : Boolean(selectedReportType?.requires_competitor_verification);
+
+  const canRun =
+    url.trim() && jobCustomerId && promptId && modelId && reportTypeId && status !== 'running';
 
   const handleRun = useCallback(async () => {
     if (!canRun) return;
+
+    setHomeHandoff((h) => (h ? { ...h, dismissed: true } : h));
 
     abortRef.current = new AbortController();
     setStatus('fetching');
@@ -92,11 +191,12 @@ export function RunnerPage() {
     try {
       await api.jobs.run(
         {
-          customer_id: customerId,
+          customer_id: jobCustomerId,
           prompt_id: promptId,
           model_id: modelId,
           input_url: url.trim(),
-          report_template: reportTemplate,
+          report_type_id: reportTypeId,
+          verify_competitors: verifyOverride,
         },
         (event: SSEEvent) => {
           if (event.type === 'status') {
@@ -126,7 +226,7 @@ export function RunnerPage() {
         setStatus('error');
       }
     }
-  }, [canRun, url, customerId, promptId, modelId, reportTemplate]);
+  }, [canRun, url, jobCustomerId, promptId, modelId, reportTypeId, verifyOverride]);
 
   const handleStop = () => {
     abortRef.current?.abort();
@@ -158,23 +258,17 @@ export function RunnerPage() {
   };
 
   const selectedModel = models.find((m) => m.id === modelId);
-  const selectedPrompt = prompts.find((p) => p.id === promptId);
-  const availableTemplates = reportTemplates.length > 0
-    ? reportTemplates
-    : listKnownReportTemplates().map((t) => ({
-      id: t.id,
-      key: t.id,
-      label: t.label,
-      description: t.description,
-      output_contract: '',
-      active: true,
-      sort_order: 100,
-      created_at: '',
-      updated_at: '',
-    }));
-  const selectedTemplateMeta = availableTemplates.find((t) => t.key === reportTemplate) ?? availableTemplates[0];
-  const selectedTemplate = getKnownReportTemplate(selectedTemplateMeta?.key);
-  const parsedReport = selectedTemplate ? selectedTemplate.parse(output) : null;
+  const renderer = selectedReportType?.output_format?.key
+    ? getKnownReportTemplate(selectedReportType.output_format.key)
+    : null;
+  const parsedReport = renderer ? renderer.parse(output) : null;
+
+  const activeHandoff = homeHandoff && !homeHandoff.dismissed ? homeHandoff : null;
+  const emphasizeRun = activeHandoff?.intent === 'review_and_run' && status === 'idle';
+  const coldRunnerIntro =
+    !url.trim() &&
+    status === 'idle' &&
+    !(location.state as RunnerPrefillState | null)?.fromHome;
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
@@ -182,6 +276,68 @@ export function RunnerPage() {
 
         {/* ── LEFT: Input Panel ──────────────────────────────────────────── */}
         <div className="w-full xl:w-[380px] shrink-0 flex flex-col gap-4">
+
+          {coldRunnerIntro && (
+            <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+              <p className="font-medium text-gray-800">Runner</p>
+              <p className="mt-1 text-xs text-gray-500 leading-relaxed">
+                Paste a product URL and choose report options here, or use the{' '}
+                <Link to="/" className="text-brand-600 hover:underline font-medium">
+                  home page
+                </Link>{' '}
+                for a guided quick start.
+              </p>
+            </div>
+          )}
+
+          {activeHandoff && (
+            <div
+              className="rounded-xl border border-brand-200 bg-brand-50/90 px-4 py-3 text-sm text-gray-800 shadow-sm"
+              role="region"
+              aria-label="Quick start from home"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 space-y-2">
+                  <p className="font-medium text-gray-900">Report settings</p>
+                  {activeHandoff.intent === 'review_and_run' ? (
+                    <p className="text-xs text-gray-600 leading-relaxed">
+                      Review the panel below, then click <span className="font-medium text-gray-800">Run analysis</span> to
+                      start. You can still change any field first.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-600 leading-relaxed">
+                      Adjust prompt, model, or verification if you like. Nothing runs until you click{' '}
+                      <span className="font-medium text-gray-800">Run analysis</span>.
+                    </p>
+                  )}
+                  <dl className="grid gap-1 text-xs text-gray-600 border-t border-brand-100/80 pt-2 mt-2">
+                    <div className="flex gap-2 min-w-0">
+                      <dt className="shrink-0 text-gray-500">URL</dt>
+                      <dd className="font-mono text-[11px] text-gray-800 truncate" title={activeHandoff.inputUrl}>
+                        {activeHandoff.inputUrl || '—'}
+                      </dd>
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <dt className="shrink-0 text-gray-500">Report</dt>
+                      <dd className="text-gray-800">{activeHandoff.reportLabel}</dd>
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <dt className="shrink-0 text-gray-500">Model</dt>
+                      <dd className="text-gray-800">{activeHandoff.modelLabel}</dd>
+                    </div>
+                  </dl>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHomeHandoff((h) => (h ? { ...h, dismissed: true } : h))}
+                  className="shrink-0 rounded-lg p-1 text-gray-500 hover:bg-brand-100/80 hover:text-gray-800 transition"
+                  aria-label="Dismiss quick start notice"
+                >
+                  <X className="w-4 h-4" aria-hidden />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* URL input */}
           <div className="card p-5">
@@ -202,48 +358,62 @@ export function RunnerPage() {
 
           {/* Config selectors */}
           <div className="card p-5 flex flex-col gap-4">
-            {/* Customer */}
+            {/* Report type */}
             <div>
-              <label className="label">Customer</label>
-              {customers.length === 0 ? (
+              <label className="label">Report type</label>
+              {reportTypes.length === 0 ? (
                 <p className="text-sm text-gray-400 italic">
-                  No customers yet.{' '}
-                  <Link to="/admin" className="text-brand-600 hover:underline">Add one in Admin</Link>
+                  No report types yet.{' '}
+                  <Link to="/admin" className="text-brand-600 hover:underline">
+                    Create one in Admin
+                  </Link>.
                 </p>
               ) : (
                 <select
                   className="select"
-                  value={customerId}
-                  onChange={(e) => setCustomerId(e.target.value)}
+                  value={reportTypeId}
+                  onChange={(e) => {
+                    setReportTypeId(e.target.value);
+                    promptManuallyChangedRef.current = false;
+                    setVerifyOverride(null);
+                  }}
                   disabled={status === 'running'}
                 >
-                  <option value="">Select a customer…</option>
-                  {customers.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
+                  {reportTypes.map((rt) => (
+                    <option key={rt.id} value={rt.id}>{rt.label}</option>
                   ))}
                 </select>
               )}
+              {selectedReportType?.description && (
+                <p className="mt-1.5 text-xs text-gray-400 line-clamp-2">
+                  {selectedReportType.description}
+                </p>
+              )}
             </div>
 
-            {/* Prompt */}
+            {/* Prompt (defaults from report type, can override) */}
             <div>
               <label className="label">Prompt</label>
-              {!customerId ? (
-                <p className="text-xs text-gray-400 italic">Select a customer first</p>
-              ) : prompts.length === 0 ? (
+              {prompts.length === 0 ? (
                 <p className="text-sm text-gray-400 italic">
-                  No prompts for this customer.{' '}
-                  <Link to="/admin" className="text-brand-600 hover:underline">Create one</Link>
+                  No prompts yet.{' '}
+                  <Link to="/admin" className="text-brand-600 hover:underline">Create prompts in Admin</Link>.
                 </p>
               ) : (
                 <select
                   className="select"
                   value={promptId}
-                  onChange={(e) => setPromptId(e.target.value)}
+                  onChange={(e) => {
+                    promptManuallyChangedRef.current = true;
+                    setPromptId(e.target.value);
+                  }}
                   disabled={status === 'running'}
                 >
                   {prompts.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {selectedReportType?.default_prompt_id === p.id ? ' · default' : ''}
+                    </option>
                   ))}
                 </select>
               )}
@@ -273,23 +443,29 @@ export function RunnerPage() {
               )}
             </div>
 
-            {/* Report Template */}
-            <div>
-              <label className="label">Report Template</label>
-              <select
-                className="select"
-                value={reportTemplate}
-                onChange={(e) => setReportTemplate(e.target.value)}
+            <label className="flex items-start gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="mt-0.5 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                checked={verifyEffective}
+                onChange={(e) => setVerifyOverride(e.target.checked)}
                 disabled={status === 'running'}
-              >
-                {availableTemplates.map((template) => (
-                  <option key={template.id} value={template.key}>{template.label}</option>
-                ))}
-              </select>
-              <p className="mt-1.5 text-xs text-gray-400">
-                {selectedTemplateMeta?.description || 'Template description not provided.'}
-              </p>
-            </div>
+              />
+              <span>
+                <span className="text-sm font-medium text-gray-700">Verify competitor PDPs</span>
+                <span className="block text-xs text-gray-400 mt-0.5">
+                  SerpAPI (Google US, English) + Firecrawl scrape; only identifier-matched URLs are injected into the prompt.
+                  {selectedReportType ? (
+                    <>
+                      {' '}Default for this report type:{' '}
+                      <code className="text-[11px] bg-gray-100 px-1 rounded">
+                        {selectedReportType.requires_competitor_verification ? 'on' : 'off'}
+                      </code>
+                    </>
+                  ) : null}
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* CTA */}
@@ -301,9 +477,13 @@ export function RunnerPage() {
               </button>
             ) : (
               <button
+                ref={runBtnRef}
                 onClick={handleRun}
                 disabled={!canRun}
-                className="btn-primary flex-1 justify-center py-2.5 text-sm"
+                className={clsx(
+                  'btn-primary flex-1 justify-center py-2.5 text-sm transition-shadow',
+                  emphasizeRun && 'ring-2 ring-brand-400 ring-offset-2 shadow-md',
+                )}
               >
                 <Play className="w-4 h-4" />
                 Run Analysis
@@ -438,8 +618,8 @@ export function RunnerPage() {
 
             {output && (
               <div ref={pdfContentRef} className="bg-white rounded-lg p-4 shadow-sm">
-                {selectedTemplate && parsedReport && status !== 'running' ? (
-                  <>{selectedTemplate.render(parsedReport)}</>
+                {renderer && parsedReport && status !== 'running' ? (
+                  <>{renderer.render(parsedReport)}</>
                 ) : (
                   <div
                     className={clsx(

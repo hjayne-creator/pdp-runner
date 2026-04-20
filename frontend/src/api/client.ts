@@ -1,5 +1,5 @@
 import type {
-  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent, ReportTemplate,
+  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent, ReportType, OutputFormat,
 } from './types';
 
 const BASE = '/api';
@@ -16,8 +16,6 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-// ── Customers ─────────────────────────────────────────────────────────────────
-
 export const api = {
   customers: {
     list: () => req<Customer[]>('/customers/'),
@@ -30,7 +28,6 @@ export const api = {
       req<{ ok: boolean }>(`/customers/${id}`, { method: 'DELETE' }),
   },
 
-  // ── Prompts ─────────────────────────────────────────────────────────────────
   prompts: {
     list: (customerId?: string) => {
       const params = customerId ? `?customer_id=${customerId}` : '';
@@ -45,7 +42,6 @@ export const api = {
       req<{ ok: boolean }>(`/prompts/${id}`, { method: 'DELETE' }),
   },
 
-  // ── Models ───────────────────────────────────────────────────────────────────
   models: {
     list: () => req<AIModel[]>('/models/'),
     listAll: () => req<AIModel[]>('/models/all'),
@@ -58,7 +54,6 @@ export const api = {
       req<{ ok: boolean }>(`/models/${id}`, { method: 'DELETE' }),
   },
 
-  // ── Jobs ──────────────────────────────────────────────────────────────────────
   jobs: {
     list: (customerId?: string, limit = 50) => {
       const params = new URLSearchParams({ limit: String(limit) });
@@ -117,16 +112,34 @@ export const api = {
     },
   },
 
-  // ── Report Templates ──────────────────────────────────────────────────────────
-  reportTemplates: {
-    list: (activeOnly = true) =>
-      req<ReportTemplate[]>(`/report-templates/?active_only=${activeOnly ? 'true' : 'false'}`),
-    get: (id: string) => req<ReportTemplate>(`/report-templates/${id}`),
-    create: (body: Omit<ReportTemplate, 'id' | 'created_at' | 'updated_at'>) =>
-      req<ReportTemplate>('/report-templates/', { method: 'POST', body: JSON.stringify(body) }),
-    update: (id: string, body: Partial<ReportTemplate>) =>
-      req<ReportTemplate>(`/report-templates/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  reportTypes: {
+    list: (params: { activeOnly?: boolean; workflow?: string } = {}) => {
+      const search = new URLSearchParams();
+      search.set('active_only', params.activeOnly === false ? 'false' : 'true');
+      if (params.workflow) search.set('workflow', params.workflow);
+      return req<ReportType[]>(`/report-types/?${search}`);
+    },
+    get: (id: string) => req<ReportType>(`/report-types/${id}`),
+    create: (body: Omit<ReportType, 'id' | 'created_at' | 'updated_at' | 'output_format'>) =>
+      req<ReportType>('/report-types/', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: Partial<Omit<ReportType, 'output_format'>>) =>
+      req<ReportType>(`/report-types/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     delete: (id: string) =>
-      req<{ ok: boolean }>(`/report-templates/${id}`, { method: 'DELETE' }),
+      req<{ ok: boolean }>(`/report-types/${id}`, { method: 'DELETE' }),
+  },
+
+  outputFormats: {
+    list: (params: { activeOnly?: boolean } = {}) => {
+      const search = new URLSearchParams();
+      if (params.activeOnly) search.set('active_only', 'true');
+      return req<OutputFormat[]>(`/output-formats/?${search}`);
+    },
+    get: (id: string) => req<OutputFormat>(`/output-formats/${id}`),
+    create: (body: Omit<OutputFormat, 'id' | 'created_at' | 'updated_at'>) =>
+      req<OutputFormat>('/output-formats/', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: Partial<OutputFormat>) =>
+      req<OutputFormat>(`/output-formats/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    delete: (id: string) =>
+      req<{ ok: boolean }>(`/output-formats/${id}`, { method: 'DELETE' }),
   },
 };

@@ -1,9 +1,10 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Zap, History, Settings } from 'lucide-react';
+import { Home, Zap, History, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 
 const NAV = [
-  { to: '/', label: 'Run Analysis', icon: Zap },
+  { to: '/', label: 'Home', icon: Home },
+  { to: '/run', label: 'Runner', icon: Zap },
   { to: '/history', label: 'Job History', icon: History },
   { to: '/admin', label: 'Admin', icon: Settings },
 ];
@@ -29,7 +30,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
           {/* Nav links */}
           <nav className="flex items-center gap-1">
             {NAV.map(({ to, label, icon: Icon }) => {
-              const active = to === '/' ? pathname === '/' : pathname.startsWith(to);
+              const active =
+                to === '/' ? pathname === '/' : pathname === to || pathname.startsWith(`${to}/`);
               return (
                 <Link
                   key={to}

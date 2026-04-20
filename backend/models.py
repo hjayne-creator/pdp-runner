@@ -13,6 +13,16 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+class AppSetting(Base):
+    """Key/value flags for app-level state (e.g. one-time bootstrap markers)."""
+
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Customer(Base):
     __tablename__ = "customers"
 
@@ -43,7 +53,7 @@ class Prompt(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     customer = relationship("Customer", back_populates="prompts")
-    jobs = relationship("Job", back_populates="prompt")
+    jobs = relationship("Job", back_populates="prompt", cascade="all, delete-orphan")
 
 
 class AIModel(Base):
@@ -65,6 +75,59 @@ class AIModel(Base):
     jobs = relationship("Job", back_populates="model")
 
 
+class OutputFormat(Base):
+    """Pairs a frontend renderer key with the JSON contract the AI must produce.
+
+    The ``key`` field doubles as the renderer lookup on the frontend — a known
+    key (e.g. ``pdp-audit-v1``) selects a registered React component; an unknown
+    key falls back to raw-JSON output. ReportTypes reference an OutputFormat so
+    the contract + renderer always travel together.
+    """
+
+    __tablename__ = "output_formats"
+
+    id = Column(String, primary_key=True, default=generate_id)
+    key = Column(String, nullable=False, unique=True)
+    label = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    contract = Column(Text, nullable=False)
+    active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=100)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    report_types = relationship("ReportType", back_populates="output_format")
+
+
+class ReportType(Base):
+    """A user-facing analysis option. Wires together a prompt, an output
+    format, and behavior flags so Home can render Step 3 from data alone."""
+
+    __tablename__ = "report_types"
+
+    id = Column(String, primary_key=True, default=generate_id)
+    key = Column(String, nullable=False, unique=True)
+    label = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    workflow = Column(String, nullable=False, default="retail")  # retail | house_brand
+    icon = Column(String, nullable=True)  # lucide-react icon name
+    default_prompt_id = Column(
+        String, ForeignKey("prompts.id", ondelete="SET NULL"), nullable=True
+    )
+    output_format_id = Column(
+        String, ForeignKey("output_formats.id", ondelete="SET NULL"), nullable=True
+    )
+    requires_competitor_verification = Column(Boolean, default=False)
+    active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=100)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    default_prompt = relationship("Prompt", foreign_keys=[default_prompt_id])
+    output_format = relationship("OutputFormat", back_populates="report_types")
+    jobs = relationship("Job", back_populates="report_type")
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
@@ -72,10 +135,13 @@ class Job(Base):
     customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
     prompt_id = Column(String, ForeignKey("prompts.id"), nullable=False)
     model_id = Column(String, ForeignKey("ai_models.id"), nullable=False)
-    report_template = Column(String, nullable=False, default="pdp-audit-v1")
+    report_type_id = Column(
+        String, ForeignKey("report_types.id", ondelete="SET NULL"), nullable=True
+    )
 
     input_url = Column(String, nullable=False)
     pdp_data = Column(JSON, nullable=True)  # extracted PDP content
+    competitor_verification = Column(JSON, nullable=True)  # SerpAPI + verify audit
     prompt_rendered = Column(Text, nullable=True)  # final prompt sent to AI
     output = Column(Text, nullable=True)
     output_tokens = Column(Integer, nullable=True)
@@ -90,17 +156,4 @@ class Job(Base):
     customer = relationship("Customer", back_populates="jobs")
     prompt = relationship("Prompt", back_populates="jobs")
     model = relationship("AIModel", back_populates="jobs")
-
-
-class ReportTemplate(Base):
-    __tablename__ = "report_templates"
-
-    id = Column(String, primary_key=True, default=generate_id)
-    key = Column(String, nullable=False, unique=True)
-    label = Column(String, nullable=False)
-    description = Column(Text, nullable=True)
-    output_contract = Column(Text, nullable=False)
-    active = Column(Boolean, default=True)
-    sort_order = Column(Integer, default=100)
-    created_at = Column(DateTime, default=utcnow)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    report_type = relationship("ReportType", back_populates="jobs")

@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
-import { ReportView } from "../components/ReportView";
 import { QuickBriefReportView } from "../components/QuickBriefReportView";
-import { parseReport, type PDPReport } from "./report";
+import { AiRewriteReportView } from "../components/AiRewriteReportView";
 import type { QuickBriefReport } from "../types/quickBriefReport";
+import type { AiRewriteReport } from "../types/aiRewriteReport";
 
 export { type QuickBriefReport } from "../types/quickBriefReport";
 
-export const DEFAULT_REPORT_TEMPLATE = "pdp-audit-v1";
+export const DEFAULT_REPORT_TEMPLATE = "pdp-ai-rewrite-v1";
 
 /** Top-level keys from the expanded quick-brief JSON contract (DB-driven). */
 const QUICK_BRIEF_TOP_KEYS = new Set([
@@ -79,24 +79,53 @@ function parseQuickBrief(output: string): QuickBriefReport | null {
   return parsed as QuickBriefReport;
 }
 
-const AUDIT_TEMPLATE: ReportTemplateDefinition<PDPReport> = {
-  id: "pdp-audit-v1",
-  label: "PDP Audit (Detailed)",
-  description: "Full audit with cleanup fixes, parametric updates, and revised overview copy.",
-  parse: parseReport,
-  render: (parsed) => <ReportView report={parsed} />,
-};
+function parseAiRewrite(output: string): AiRewriteReport | null {
+  const jsonBlock = extractJsonBlock(output);
+  if (!jsonBlock) return null;
 
-const QUICK_BRIEF_TEMPLATE: ReportTemplateDefinition<QuickBriefReport> = {
-  id: "pdp-quick-brief-v1",
-  label: "PDP Quick Brief",
-  description:
-    "Competitive benchmark, gap analysis, recommended additions, generated copy, issues and opportunities.",
+  const parsed = safeJsonParse(jsonBlock);
+  if (!isObject(parsed)) return null;
+
+  const hasShape =
+    "revised_title" in parsed ||
+    "revised_short_description" in parsed ||
+    "revised_long_description" in parsed ||
+    "key_bullets" in parsed;
+  if (!hasShape) return null;
+
+  return parsed as AiRewriteReport;
+}
+
+/** Same JSON contract as the legacy quick-brief shape; used by retail gap-analysis report types. */
+const GAP_ANALYSIS_TEMPLATE: ReportTemplateDefinition<QuickBriefReport> = {
+  id: "pdp-gap-analysis-v1",
+  label: "PDP Gap Analysis",
+  description: "Competitive gap analysis (quick-brief JSON contract).",
   parse: parseQuickBrief,
   render: (parsed) => <QuickBriefReportView report={parsed} />,
 };
 
-const REPORT_TEMPLATES = [AUDIT_TEMPLATE, QUICK_BRIEF_TEMPLATE] as const;
+const GAP_ANALYSIS_REWRITE_TEMPLATE: ReportTemplateDefinition<QuickBriefReport> = {
+  id: "pdp-gap-analysis-rewrite-v1",
+  label: "PDP Gap Analysis + Rewrite",
+  description: "Gap analysis plus revised copy (quick-brief JSON contract).",
+  parse: parseQuickBrief,
+  render: (parsed) => <QuickBriefReportView report={parsed} />,
+};
+
+const AI_REWRITE_TEMPLATE: ReportTemplateDefinition<AiRewriteReport> = {
+  id: "pdp-ai-rewrite-v1",
+  label: "PDP AI Rewrite",
+  description: "Revised title, short and long descriptions, bullets, SEO notes, and sources.",
+  parse: parseAiRewrite,
+  render: (parsed) => <AiRewriteReportView report={parsed} />,
+};
+
+const REPORT_TEMPLATES = [
+  GAP_ANALYSIS_TEMPLATE,
+  GAP_ANALYSIS_REWRITE_TEMPLATE,
+  AI_REWRITE_TEMPLATE,
+] as const;
 
 export type ReportTemplateId = (typeof REPORT_TEMPLATES)[number]["id"];
 
@@ -114,4 +143,9 @@ export function listKnownReportTemplates(): KnownReportTemplate[] {
 
 export function getKnownReportTemplate(templateId?: string): KnownReportTemplate | null {
   return listKnownReportTemplates().find((template) => template.id === templateId) ?? null;
+}
+
+/** Output format keys that resolve to a structured report UI (Admin badges, docs). */
+export function getRegisteredRendererTemplateIds(): string[] {
+  return listKnownReportTemplates().map((t) => t.id);
 }

@@ -1,13 +1,15 @@
+"""
+Built-in default output contracts used only during the **one-time** retail
+bootstrap in ``seed.py`` (creating ``OutputFormat`` rows). After bootstrap, the
+database (Admin UI) is authoritative; restarting the app does not re-apply these
+strings to existing rows. They remain useful as reference when authoring new
+formats in Admin.
+"""
 from typing import Dict
 
-from sqlalchemy.orm import Session
+DEFAULT_OUTPUT_RENDERER = "pdp-ai-rewrite-v1"
 
-import models
-
-DEFAULT_REPORT_TEMPLATE = "pdp-audit-v1"
-
-REPORT_TEMPLATES: Dict[str, str] = {
-    "pdp-audit-v1": """
+_PDP_AUDIT_V1_CONTRACT = """
 === OUTPUT CONTRACT ===
 Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shape:
 {
@@ -48,8 +50,9 @@ Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shap
 If there are no new content blocks, return:
 "recommended_new_content_blocks": ["No new content blocks recommended"]
 === END OUTPUT CONTRACT ===
-""".strip(),
-    "pdp-quick-brief-v1": """
+""".strip()
+
+_PDP_QUICK_BRIEF_V1_CONTRACT = """
 === OUTPUT CONTRACT ===
 Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shape:
 {
@@ -225,20 +228,25 @@ Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shap
   "sources": ["https://..."]
 }
 === END OUTPUT CONTRACT ===
-""".strip(),
+""".strip()
+
+OUTPUT_CONTRACTS: Dict[str, str] = {
+    "pdp-ai-rewrite-v1": """
+=== OUTPUT CONTRACT ===
+Return ONLY valid JSON (no markdown fences, no extra prose) with this exact shape:
+{
+  "revised_title": "string",
+  "revised_short_description": "string (1-2 sentences)",
+  "revised_long_description": "string (full PDP body copy)",
+  "key_bullets": ["string"],
+  "seo_notes": "string (keywords, meta guidance, internal link ideas — no fabrication)",
+  "assumptions_or_open_questions": ["string"],
+  "sources": ["https://..."]
 }
-
-
-def get_output_contract(template_id: str, db: Session | None = None) -> str:
-    if db is not None:
-        record = (
-            db.query(models.ReportTemplate)
-            .filter(models.ReportTemplate.key == template_id)
-            .first()
-        )
-        if record and record.output_contract:
-            selected = record.output_contract.strip()
-            return f"{selected}\n"
-
-    selected = REPORT_TEMPLATES.get(template_id, REPORT_TEMPLATES[DEFAULT_REPORT_TEMPLATE])
-    return f"{selected}\n"
+=== END OUTPUT CONTRACT ===
+""".strip(),
+    "pdp-gap-analysis-v1": _PDP_QUICK_BRIEF_V1_CONTRACT,
+    "pdp-gap-analysis-rewrite-v1": _PDP_QUICK_BRIEF_V1_CONTRACT,
+    "pdp-audit-v1": _PDP_AUDIT_V1_CONTRACT,
+    "pdp-quick-brief-v1": _PDP_QUICK_BRIEF_V1_CONTRACT,
+}

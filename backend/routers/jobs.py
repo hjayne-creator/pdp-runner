@@ -1,6 +1,6 @@
 import time
 import json
-import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional, AsyncGenerator
 
@@ -16,10 +16,11 @@ from services.pdp_service import (
     pdp_is_actionable,
     render_prompt,
 )
-from services.report_templates import DEFAULT_REPORT_TEMPLATE
+from services.competitor_verification import run_competitor_verification
 from services.ai_service import run_ai_stream
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+_log = logging.getLogger(__name__)
 
 
 def _load_job(job_id: str, db: Session) -> models.Job:
@@ -29,6 +30,7 @@ def _load_job(job_id: str, db: Session) -> models.Job:
             joinedload(models.Job.customer),
             joinedload(models.Job.prompt),
             joinedload(models.Job.model),
+            joinedload(models.Job.report_type).joinedload(models.ReportType.output_format),
         )
         .filter(models.Job.id == job_id)
         .first()
@@ -51,6 +53,7 @@ def list_jobs(
             joinedload(models.Job.customer),
             joinedload(models.Job.prompt),
             joinedload(models.Job.model),
+            joinedload(models.Job.report_type).joinedload(models.ReportType.output_format),
         )
         .order_by(models.Job.created_at.desc())
     )
@@ -81,7 +84,6 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
     Returns SSE stream: data: <token>\n\n
     Final event: data: [DONE] <job_id>\n\n
     """
-    # Validate references
     customer = db.query(models.Customer).filter(models.Customer.id == body.customer_id).first()
     if not customer:
         raise HTTPException(404, detail="Customer not found")
@@ -94,35 +96,60 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
     if not model_obj:
         raise HTTPException(404, detail="Model not found")
 
-    template_key = body.report_template or DEFAULT_REPORT_TEMPLATE
-    template_obj = (
-        db.query(models.ReportTemplate)
-        .filter(
-            models.ReportTemplate.key == template_key,
-            models.ReportTemplate.active == True,
+    report_type_obj: Optional[models.ReportType] = None
+    if body.report_type_id:
+        report_type_obj = (
+            db.query(models.ReportType)
+            .options(joinedload(models.ReportType.output_format))
+            .filter(models.ReportType.id == body.report_type_id)
+            .first()
         )
-        .first()
-    )
-    if not template_obj:
-        # Fall back to built-in default for backward compatibility.
-        template_key = DEFAULT_REPORT_TEMPLATE
+        if not report_type_obj:
+            raise HTTPException(404, detail="Report type not found")
+    else:
+        # Fallback: pick the first active report type so legacy callers still work.
+        report_type_obj = (
+            db.query(models.ReportType)
+            .options(joinedload(models.ReportType.output_format))
+            .filter(models.ReportType.active == True)
+            .order_by(models.ReportType.sort_order, models.ReportType.label)
+            .first()
+        )
+        if not report_type_obj:
+            raise HTTPException(
+                400,
+                detail="No active report types configured. Create one in Admin → Report Types.",
+            )
 
-    # Extract all needed values as plain scalars NOW, while the session is alive.
-    # The event_stream generator runs after FastAPI closes the request-scoped
-    # session, so ORM instances become detached and attribute access fails.
+    if not report_type_obj.output_format:
+        raise HTTPException(
+            400,
+            detail=(
+                f"Report type '{report_type_obj.label}' has no Output Format set. "
+                "Pick one in Admin → Report Types."
+            ),
+        )
+
+    # Capture scalars now — the SSE generator runs after the request session closes.
     prompt_content = prompt_obj.content
     model_display_name = model_obj.display_name
     model_provider = model_obj.provider
     model_model_id = model_obj.model_id
     model_max_tokens = model_obj.max_tokens
     model_config = dict(model_obj.config or {})
+    output_contract = report_type_obj.output_format.contract or ""
+    output_renderer = report_type_obj.output_format.key or "pdp-audit-v1"
+    report_type_id = report_type_obj.id
+    if body.verify_competitors is None:
+        verify_competitors = bool(report_type_obj.requires_competitor_verification)
+    else:
+        verify_competitors = bool(body.verify_competitors)
 
-    # Create job record
     job = models.Job(
         customer_id=body.customer_id,
         prompt_id=body.prompt_id,
         model_id=body.model_id,
-        report_template=template_key,
+        report_type_id=report_type_id,
         input_url=body.input_url,
         status="running",
     )
@@ -137,9 +164,10 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         error_msg: Optional[str] = None
         pdp_data: Optional[dict] = None
         rendered: Optional[str] = None
+        competitor_audit: Optional[dict] = None
+        verified_context: Optional[str] = None
 
         try:
-            # 1. Fetch PDP
             yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching product page...'})}\n\n"
             pdp_data = await fetch_pdp(body.input_url)
 
@@ -147,14 +175,66 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                 warn_msg = f"PDP fetch warning: {pdp_data['error']}"
                 yield f"data: {json.dumps({'type': 'warning', 'message': warn_msg})}\n\n"
 
-            # 2. Render prompt (stored for history even if we skip the model)
+            if verify_competitors and pdp_is_actionable(pdp_data):
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Discovering competitor PDPs (SerpAPI)…'})}\n\n"
+                try:
+                    verified_context, competitor_audit = await run_competitor_verification(
+                        pdp_data, body.input_url
+                    )
+                except Exception as cexc:
+                    _log.warning("competitor verification failed: %s", cexc, exc_info=True)
+                    competitor_audit = {
+                        "skipped": True,
+                        "skip_reason": "verification_error",
+                        "error": str(cexc),
+                        "queries_run": [],
+                        "candidates": [],
+                        "verified": [],
+                    }
+                    verified_context = (
+                        "=== VERIFIED COMPETITOR PDPs (identifier-matched) ===\n"
+                        "Competitor verification failed on the server; do not invent "
+                        "competitor URLs. Proceed with identifier-grounded subject PDP "
+                        "improvements only.\n"
+                        "=== END VERIFIED COMPETITORS ==="
+                    )
+                n_ver = len((competitor_audit or {}).get("verified") or [])
+                if competitor_audit and competitor_audit.get("skipped"):
+                    reason = competitor_audit.get("skip_reason") or "unknown"
+                    skip_msg = f"Competitor verification skipped: {reason}"
+                    err = competitor_audit.get("error")
+                    if err:
+                        skip_msg = f"{skip_msg} ({err})"
+                    yield f"data: {json.dumps({'type': 'warning', 'message': skip_msg})}\n\n"
+                elif n_ver == 0:
+                    yield f"data: {json.dumps({'type': 'warning', 'message': 'No verified exact-match competitor PDPs; analysis will use identifier-grounded subject improvements only.'})}\n\n"
+                else:
+                    ok_msg = f"Verified {n_ver} competitor PDP(s) for the final prompt."
+                    yield f"data: {json.dumps({'type': 'status', 'message': ok_msg})}\n\n"
+            elif verify_competitors:
+                competitor_audit = {
+                    "skipped": True,
+                    "skip_reason": "subject_pdp_not_actionable",
+                    "subject_identifiers": {},
+                    "queries_run": [],
+                    "candidates": [],
+                    "verified": [],
+                }
+                verified_context = (
+                    "=== VERIFIED COMPETITOR PDPs (identifier-matched) ===\n"
+                    "Competitor verification was skipped because the subject PDP "
+                    "could not be loaded reliably.\n"
+                    "=== END VERIFIED COMPETITORS ==="
+                )
+                yield f"data: {json.dumps({'type': 'warning', 'message': 'Competitor verification skipped: subject PDP was not actionable.'})}\n\n"
+
             yield f"data: {json.dumps({'type': 'status', 'message': 'Rendering prompt...'})}\n\n"
             rendered = render_prompt(
                 prompt_content,
                 pdp_data,
                 body.input_url,
-                template_key,
-                db,
+                output_contract,
+                verified_competitor_context=verified_context,
             )
 
             if not pdp_is_actionable(pdp_data):
@@ -163,13 +243,10 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                     or "The product URL did not return usable page content after automatic retries."
                 )
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Skipping model: no usable PDP content (blocked or empty).'})}\n\n"
-                blocked = blocked_analysis_json(
-                    reason, template_key
-                )
+                blocked = blocked_analysis_json(reason, output_renderer)
                 output_chunks.append(blocked)
                 yield f"data: {json.dumps({'type': 'token', 'content': blocked})}\n\n"
             else:
-                # 3. Stream AI
                 yield f"data: {json.dumps({'type': 'status', 'message': f'Running {model_display_name}...'})}\n\n"
                 async for chunk in run_ai_stream(
                     provider=model_provider,
@@ -186,11 +263,9 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
             yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
 
         finally:
-            # Persist result
             duration_ms = int(time.time() * 1000) - start_ms
             full_output = "".join(output_chunks)
 
-            # Use a fresh DB session for the final write
             from database import SessionLocal
             write_db = SessionLocal()
             try:
@@ -198,6 +273,8 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                 if final_job:
                     final_job.output = full_output
                     final_job.pdp_data = pdp_data
+                    if verify_competitors:
+                        final_job.competitor_verification = competitor_audit
                     final_job.prompt_rendered = rendered
                     final_job.status = "failed" if error_msg else "completed"
                     final_job.error = error_msg

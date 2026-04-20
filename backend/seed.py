@@ -1,48 +1,62 @@
-"""Seed the database with initial data."""
+"""Seed the database with initial data.
+
+Single-tenant retail workflow with three report types — each one wires together
+a default prompt, an output format (renderer + contract), and behavior flags.
+
+The **retail bootstrap** (output formats + default prompts + report types) runs
+only once per database. After that, Admin is authoritative: restarts do not
+re-insert deleted rows. To re-run defaults from code, delete the SQLite file or
+run: ``python seed.py --force-bootstrap``
+
+AI models are still seeded only when the ``ai_models`` table is empty.
+"""
 from database import SessionLocal, engine
 import models
-from services.report_templates import REPORT_TEMPLATES
+from services.report_templates import OUTPUT_CONTRACTS
 
-JAMECO_PROMPT = """You are a senior technical eCommerce content editor for Jameco.
+# Marks that built-in retail defaults were applied; checked before any bootstrap I/O.
+RETAIL_BOOTSTRAP_SETTING_KEY = "retail_bootstrap_v1"
 
-Your job is to audit and improve a Jameco product detail page when given a Jameco URL. Improve the page only where it materially helps the customer choose, install, or order the right part. Do not add generic SEO filler. Do not add marketing copy unless it is credible, useful, and consistent with Jameco's voice.
+# Built-in OutputFormats. ``key`` doubles as the frontend renderer lookup.
+OUTPUT_FORMAT_SPECS = [
+    {
+        "key": "pdp-ai-rewrite-v1",
+        "label": "PDP AI Rewrite",
+        "description": "Placeholder — edit in Admin.",
+        "contract_key": "pdp-ai-rewrite-v1",
+        "sort_order": 10,
+    },
+    {
+        "key": "pdp-gap-analysis-v1",
+        "label": "PDP GAP Analysis",
+        "description": "Placeholder — edit in Admin.",
+        "contract_key": "pdp-gap-analysis-v1",
+        "sort_order": 20,
+    },
+    {
+        "key": "pdp-gap-analysis-rewrite-v1",
+        "label": "PDP Gap Analysis + Rewrite",
+        "description": "Placeholder — edit in Admin.",
+        "contract_key": "pdp-gap-analysis-rewrite-v1",
+        "sort_order": 30,
+    },
+]
 
-INPUT
-- Jameco product URL: {{JAMECO_URL}}
+# ── Placeholder retail prompts (admins can edit / replace in Admin) ─────────
+
+RETAIL_REWRITE_PLACEHOLDER = """You are a retail eCommerce PDP assistant.
 
 PRIMARY GOAL
-Produce source-backed content improvements that:
-1. Correct inaccuracies and formatting defects.
-2. Add missing or incomplete parametrics only when they are clearly supported by authoritative sources.
-3. Add new content blocks only if they improve buyer understanding in a meaningful way.
-4. Keep the tone credible, practical, technically respectful, and aligned with Jameco's audience.
+Improve the Subject's PDP description for completeness and SEO. 
 
 AUDIENCE
-Write for:
-- engineers
-- technical buyers
-- repair professionals
-- serious makers
-- industrial/product support reviewers
+Write for shoppers / customers.
 
-JAMECO VOICE
-Write in Jameco's voice:
-- plainspoken
-- specific
-- technically grounded
-- helpful
-- confident but not hype-driven
-- respectful of the reader's expertise
-
-Sound like a knowledgeable distributor helping the customer choose correctly.
-
-Do not sound like:
-- consumer lifestyle marketing
+AVOID:
 - generic AI copy
 - exaggerated persuasion
 - empty SEO prose
-
-Avoid phrases like:
+- Phrases like:
 - "perfect for a wide range of applications"
 - "game-changing"
 - "aesthetically pleasing"
@@ -50,195 +64,253 @@ Avoid phrases like:
 - "plethora of projects"
 - unsupported claims of superiority, loyalty, or conversion impact
 
-SOURCE PRIORITY
-Use sources in this order of authority:
-1. Manufacturer product page
-2. Manufacturer datasheet / spec sheet / installation guide / CAD or dimensional docs
-3. Structured data already present on Jameco PDP
-4. Jameco downloadable datasheet or related docs
-5. Competitor/distributor PDPs only to identify missing topics or useful framing
+Product URL: {{URL}}
 
-IMPORTANT:
-- Competitor pages are secondary. Never let a competitor page override manufacturer facts.
-- If sources conflict, prefer manufacturer documentation and explicitly note the conflict.
-- Do not invent values, applications, certifications, compatibility claims, included accessories, or performance statements.
+{{PDP_DATA}}
 
-WHAT TO REVIEW
-Audit the current Jameco PDP for:
-- factual inaccuracies
-- contradictions between title, bullets, specs, and overview
-- missing parametrics that are available from the manufacturer
-- broken formatting, stray HTML, duplicated headings, page-break artifacts, malformed entities
-- overly generic or salesy copy
-- missing decision-support information that would help a technical buyer
+Follow the output structure:
+{{OUTPUT_CONTRACT}}
+"""
 
-WHEN TO ADD NEW CONTENT BLOCKS
-Add a new content block only if it clearly improves the PDP in a beneficial way.
+RETAIL_COMPETITORS_PLACEHOLDER = """You are a retail eCommerce competitive analyst.
 
-A new block is justified only when it helps answer one or more of these:
-- What is this part actually for?
-- What are the most important fit/use constraints?
-- What must the buyer confirm before ordering?
-- What is included or not included?
-- What compatibility or mounting detail is easy to miss?
-- What application or installation note is important and source-backed?
+Task: Competitor-focused analysis. When verified competitor PDP excerpts appear below, use them for benchmarking. If none appear, analyze gaps and risks using only the subject PDP and state that competitor pages were not available.
 
-If the existing page is already sufficient, do not add a block just to add content.
+Product URL: {{URL}}
 
-GOOD CONTENT BLOCK TYPES
-Use only when justified:
-- What This Part Is For
-- Key Fit Checks Before Ordering
-- Application Notes
-- What's Included / Not Included
-- Mounting / Interface Notes
-- Accessory or Mating-Part Notes
-- Environmental / Compliance Notes
+{{PDP_DATA}}
 
-DO NOT ADD BLOCKS FOR:
-- generic benefits
-- filler text
-- broad educational content unrelated to this SKU
-- unsupported use cases
-- content that merely repeats the spec table
+{{VERIFIED_COMPETITOR_CONTEXT}}
 
-CATEGORY-SPECIFIC RULES
-For power supplies, prioritize:
-- input range
-- output voltage/current/power
-- cooling method
-- enclosure/open-frame/desktop/wall-mount form factor
-- connector/output termination
-- active PFC
-- remote control / remote sense / trim functions
-- operating temperature
-- approvals and compliance
-- whether AC cord or accessories are included
+Follow the output structure exactly:
+{{OUTPUT_CONTRACT}}
+"""
 
-For enclosures, racks, and cabinets, prioritize:
-- dimensions
-- rack units
-- rail type
-- mounting standard
-- material and finish
-- load/accessory compatibility where documented
-- compliance / seismic / TAA / RoHS / REACH where documented
-- downloadable CAD / STEP / DXF resources when relevant
+RETAIL_COMPETITORS_REWRITE_PLACEHOLDER = """You are a retail eCommerce strategist and copywriter.
 
-RULES FOR PARAMETRIC ENRICHMENT
-- Add only parametrics that are clearly supported by manufacturer or Jameco source material.
-- Standardize units and terminology.
-- Prefer explicit values over vague descriptors.
-- Correct wrong values if a higher-authority source proves the correction.
-- If a value cannot be verified confidently, do not add it.
-- If a value differs across sources, flag it instead of guessing.
+Task: Combine competitor-grounded analysis with a revised PDP narrative and modules. Do not invent facts; ground recommendations in the subject PDP and any verified competitor context.
 
-RULES FOR REWRITING COPY
-- Keep the main overview concise and useful.
-- Explain what matters for selection and deployment, not generic product praise.
-- Summarize only source-backed facts.
-- If a product is highly parametric and does not benefit from narrative text, keep the overview short.
-- Use short paragraphs or bullets when clarity improves.
-- Do not repeat the full spec sheet in prose.
+Product URL: {{URL}}
 
-QUALITY BAR
-Before finalizing, verify:
-- every added fact is traceable to a source
-- no contradiction remains between title, overview, and parametrics
-- no marketing fluff remains
-- no formatting artifacts remain
-- the result sounds human and technically credible
-- the result helps a Jameco customer make a better decision
+{{PDP_DATA}}
 
-OUTPUT FORMAT
+{{VERIFIED_COMPETITOR_CONTEXT}}
 
-Return the result in the following structure:
-
-1. Product Summary
-- Manufacturer
-- Manufacturer Part Number
-- Product type
-- One-sentence assessment of whether this PDP needs light, medium, or heavy revision
-
-2. Accuracy / Cleanup Fixes
-List each issue found:
-- current issue
-- correction
-- evidence source
-
-3. Parametric Updates
-List:
-- parametric field
-- current Jameco value (if present)
-- corrected or added value
-- source
-- confidence: High / Medium / Low
-
-4. Recommended New Content Blocks
-If none are justified, say:
-- No new content blocks recommended
-
-If blocks are justified, provide for each:
-- block title
-- why it helps the buyer
-- source basis
-- proposed block copy
-
-5. Revised Overview Copy
-Provide a final Jameco-ready overview that:
-- is accurate
-- is concise
-- is non-hype
-- reflects Jameco's voice
-
-6. Final Publishing Recommendation
-Choose one:
-- Publish after light edit
-- Publish after human review
-- Do not publish until source conflict is resolved
-
-7. Sources
-List all manufacturer, Jameco, and competitor URLs used.
-
-FINAL REMINDERS
-- Be conservative.
-- Accuracy is more important than length.
-- Utility is more important than SEO volume.
-- Add nothing unless it earns its place on the page.
-- Write like Jameco, not like a generic AI content engine."""
+Follow the output structure exactly:
+{{OUTPUT_CONTRACT}}
+"""
 
 
-def seed():
+# Each spec is a self-contained (prompt, report-type) pair the seed will create
+# together so the FK can be wired in one pass.
+RETAIL_SEED_SPECS = [
+    {
+        "prompt_name": "Retail — AI rewrite",
+        "prompt_description": "Default prompt for the 'PDP AI rewrite' report type.",
+        "prompt_content": RETAIL_REWRITE_PLACEHOLDER,
+        "report_key": "retail-rewrite",
+        "report_label": "PDP AI rewrite",
+        "report_description": "Placeholder — edit in Admin.",
+        "report_icon": "Wand2",
+        "output_format_key": "pdp-ai-rewrite-v1",
+        "requires_verification": False,
+        "sort_order": 10,
+    },
+    {
+        "prompt_name": "Retail — Competitor analysis",
+        "prompt_description": "Default prompt for the 'Competitor analysis' report type.",
+        "prompt_content": RETAIL_COMPETITORS_PLACEHOLDER,
+        "report_key": "retail-competitors",
+        "report_label": "Competitor analysis",
+        "report_description": "Placeholder — edit in Admin.",
+        "report_icon": "Users",
+        "output_format_key": "pdp-gap-analysis-v1",
+        "requires_verification": True,
+        "sort_order": 20,
+    },
+    {
+        "prompt_name": "Retail — Competitor analysis + rewrite",
+        "prompt_description": "Default prompt for the 'Competitor analysis + rewrite' report type.",
+        "prompt_content": RETAIL_COMPETITORS_REWRITE_PLACEHOLDER,
+        "report_key": "retail-competitors-rewrite",
+        "report_label": "Competitor analysis + rewrite",
+        "report_description": "Placeholder — edit in Admin.",
+        "report_icon": "Layers",
+        "output_format_key": "pdp-gap-analysis-rewrite-v1",
+        "requires_verification": True,
+        "sort_order": 30,
+    },
+]
+
+
+def _retail_bootstrap_done(db) -> bool:
+    return (
+        db.query(models.AppSetting)
+        .filter(models.AppSetting.key == RETAIL_BOOTSTRAP_SETTING_KEY)
+        .first()
+        is not None
+    )
+
+
+def _mark_retail_bootstrap_done(db) -> None:
+    if (
+        db.query(models.AppSetting)
+        .filter(models.AppSetting.key == RETAIL_BOOTSTRAP_SETTING_KEY)
+        .first()
+    ):
+        return
+    db.add(models.AppSetting(key=RETAIL_BOOTSTRAP_SETTING_KEY, value="1"))
+    db.commit()
+
+
+def _clear_retail_bootstrap_flag(db) -> None:
+    db.query(models.AppSetting).filter(
+        models.AppSetting.key == RETAIL_BOOTSTRAP_SETTING_KEY
+    ).delete()
+    db.commit()
+
+
+def _ensure_output_formats(db) -> dict[str, models.OutputFormat]:
+    """Ensure built-in OutputFormats exist (bootstrap only). Returns a key→row map.
+
+    For pre-existing rows, only fills empty contract / missing label from
+    migration placeholders — runs once per DB before the bootstrap flag is set.
+    """
+    by_key: dict[str, models.OutputFormat] = {}
+    for spec in OUTPUT_FORMAT_SPECS:
+        contract = OUTPUT_CONTRACTS[spec["contract_key"]]
+        fmt = (
+            db.query(models.OutputFormat)
+            .filter(models.OutputFormat.key == spec["key"])
+            .first()
+        )
+        if not fmt:
+            fmt = models.OutputFormat(
+                key=spec["key"],
+                label=spec["label"],
+                description=spec["description"],
+                contract=contract,
+                active=True,
+                sort_order=spec["sort_order"],
+            )
+            db.add(fmt)
+            db.commit()
+            db.refresh(fmt)
+        else:
+            # Heal placeholder rows written by the migration: empty contract,
+            # or label that's just the raw key (no human-friendly text yet).
+            changed = False
+            if not fmt.contract or fmt.contract.strip() == "":
+                fmt.contract = contract
+                changed = True
+            if not fmt.label or fmt.label == fmt.key:
+                fmt.label = spec["label"]
+                changed = True
+            if not fmt.description:
+                fmt.description = spec["description"]
+                changed = True
+            if changed:
+                db.commit()
+        by_key[spec["key"]] = fmt
+    return by_key
+
+
+def _ensure_tenant(db) -> models.Customer:
+    cust = db.query(models.Customer).order_by(models.Customer.created_at.asc()).first()
+    if cust:
+        return cust
+    cust = models.Customer(
+        name="Default",
+        slug="default",
+        description="Single-tenant default organization. Prompts and jobs are scoped here.",
+    )
+    db.add(cust)
+    db.commit()
+    db.refresh(cust)
+    print("✓ Seeded default tenant")
+    return cust
+
+
+def _ensure_retail_seed(db) -> None:
+    """Idempotently ensure retail prompts + report types exist and are linked."""
+    cust = _ensure_tenant(db)
+    formats = _ensure_output_formats(db)
+
+    for spec in RETAIL_SEED_SPECS:
+        fmt = formats[spec["output_format_key"]]
+        report = (
+            db.query(models.ReportType)
+            .filter(models.ReportType.key == spec["report_key"])
+            .first()
+        )
+        prompt = (
+            db.query(models.Prompt)
+            .filter(
+                models.Prompt.customer_id == cust.id,
+                models.Prompt.name == spec["prompt_name"],
+            )
+            .first()
+        )
+
+        if not prompt:
+            prompt = models.Prompt(
+                customer_id=cust.id,
+                name=spec["prompt_name"],
+                description=spec["prompt_description"],
+                content=spec["prompt_content"],
+                version=1,
+            )
+            db.add(prompt)
+            db.commit()
+            db.refresh(prompt)
+
+        if not report:
+            report = models.ReportType(
+                key=spec["report_key"],
+                label=spec["report_label"],
+                description=spec["report_description"],
+                workflow="retail",
+                icon=spec["report_icon"],
+                default_prompt_id=prompt.id,
+                output_format_id=fmt.id,
+                requires_competitor_verification=spec["requires_verification"],
+                active=True,
+                sort_order=spec["sort_order"],
+            )
+            db.add(report)
+            db.commit()
+        else:
+            changed = False
+            # Heal stale prompt FK.
+            stale_prompt = report.default_prompt_id is None or not (
+                db.query(models.Prompt)
+                .filter(models.Prompt.id == report.default_prompt_id)
+                .first()
+            )
+            if stale_prompt:
+                report.default_prompt_id = prompt.id
+                changed = True
+            # Heal stale or missing format FK.
+            stale_format = report.output_format_id is None or not (
+                db.query(models.OutputFormat)
+                .filter(models.OutputFormat.id == report.output_format_id)
+                .first()
+            )
+            if stale_format:
+                report.output_format_id = fmt.id
+                changed = True
+            if changed:
+                db.commit()
+
+
+def seed(force_bootstrap: bool = False):
     models.Base.metadata.create_all(bind=engine)
     db = SessionLocal()
 
     try:
-        # ── Report Templates ───────────────────────────────────────────────────
-        if not db.query(models.ReportTemplate).first():
-            templates = [
-                models.ReportTemplate(
-                    key="pdp-audit-v1",
-                    label="PDP Audit (Detailed)",
-                    description="Full audit with cleanup fixes, parametric updates, and revised overview copy.",
-                    output_contract=REPORT_TEMPLATES["pdp-audit-v1"],
-                    active=True,
-                    sort_order=10,
-                ),
-                models.ReportTemplate(
-                    key="pdp-quick-brief-v1",
-                    label="PDP Quick Brief",
-                    description="Compact summary with risk level, top issues, and top opportunities.",
-                    output_contract=REPORT_TEMPLATES["pdp-quick-brief-v1"],
-                    active=True,
-                    sort_order=20,
-                ),
-            ]
-            for template in templates:
-                db.add(template)
-            db.commit()
-            print("✓ Seeded report templates")
+        if force_bootstrap:
+            _clear_retail_bootstrap_flag(db)
 
-        # ── AI Models ─────────────────────────────────────────────────────────
         if not db.query(models.AIModel).first():
             ai_models = [
                 models.AIModel(
@@ -267,36 +339,30 @@ def seed():
             db.commit()
             print("✓ Seeded AI models")
 
-        # ── Customers ─────────────────────────────────────────────────────────
-        if not db.query(models.Customer).first():
-            jameco = models.Customer(
-                name="Jameco Electronics",
-                slug="jameco",
-                description="Electronics distributor serving engineers, makers, and technical buyers.",
-            )
-            db.add(jameco)
-            db.commit()
-            db.refresh(jameco)
-            print("✓ Seeded customers")
+        if _retail_bootstrap_done(db) and not force_bootstrap:
+            print("✓ Retail bootstrap skipped (Admin data kept across restarts)")
+            return
 
-            # ── Prompts ───────────────────────────────────────────────────────
-            prompt = models.Prompt(
-                customer_id=jameco.id,
-                name="Jameco PDP Audit & Enrichment",
-                description="Full audit of a Jameco product page: accuracy, parametric enrichment, copy rewrite, and publishing recommendation.",
-                content=JAMECO_PROMPT,
-                tags=["audit", "enrichment", "pdp", "jameco"],
-                version=1,
-            )
-            db.add(prompt)
-            db.commit()
-            print("✓ Seeded Jameco prompt")
-        else:
-            print("✓ Data already seeded, skipping")
+        _ensure_retail_seed(db)
+        _mark_retail_bootstrap_done(db)
+        print("✓ Initial retail bootstrap completed (report types, formats, prompts)")
 
     finally:
         db.close()
 
 
 if __name__ == "__main__":
-    seed()
+    import sys
+
+    if "--clear-bootstrap-flag" in sys.argv:
+        db = SessionLocal()
+        try:
+            _clear_retail_bootstrap_flag(db)
+            print(
+                "Cleared retail bootstrap flag. Next app start will run bootstrap "
+                "for missing keys only (won't delete Admin changes)."
+            )
+        finally:
+            db.close()
+    else:
+        seed(force_bootstrap="--force-bootstrap" in sys.argv)

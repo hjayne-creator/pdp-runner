@@ -1,6 +1,6 @@
 from typing import Optional, List, Any, Dict
 from datetime import datetime
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 
 
 # ── Customer ──────────────────────────────────────────────────────────────────
@@ -47,6 +47,7 @@ class PromptCreate(PromptBase):
 
 
 class PromptUpdate(BaseModel):
+    customer_id: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     content: Optional[str] = None
@@ -104,34 +105,76 @@ class AIModelOut(AIModelBase):
         from_attributes = True
 
 
-# ── Report Templates ───────────────────────────────────────────────────────────
+# ── Output Formats ────────────────────────────────────────────────────────────
 
-class ReportTemplateBase(BaseModel):
+class OutputFormatBase(BaseModel):
     key: str
     label: str
     description: Optional[str] = None
-    output_contract: str
+    contract: str
     active: bool = True
     sort_order: int = 100
 
 
-class ReportTemplateCreate(ReportTemplateBase):
+class OutputFormatCreate(OutputFormatBase):
     pass
 
 
-class ReportTemplateUpdate(BaseModel):
+class OutputFormatUpdate(BaseModel):
     key: Optional[str] = None
     label: Optional[str] = None
     description: Optional[str] = None
-    output_contract: Optional[str] = None
+    contract: Optional[str] = None
     active: Optional[bool] = None
     sort_order: Optional[int] = None
 
 
-class ReportTemplateOut(ReportTemplateBase):
+class OutputFormatOut(OutputFormatBase):
     id: str
     created_at: datetime
     updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Report Types ──────────────────────────────────────────────────────────────
+
+class ReportTypeBase(BaseModel):
+    key: str
+    label: str
+    description: Optional[str] = None
+    workflow: str = "retail"
+    icon: Optional[str] = None
+    default_prompt_id: Optional[str] = None
+    output_format_id: Optional[str] = None
+    requires_competitor_verification: bool = False
+    active: bool = True
+    sort_order: int = 100
+
+
+class ReportTypeCreate(ReportTypeBase):
+    pass
+
+
+class ReportTypeUpdate(BaseModel):
+    key: Optional[str] = None
+    label: Optional[str] = None
+    description: Optional[str] = None
+    workflow: Optional[str] = None
+    icon: Optional[str] = None
+    default_prompt_id: Optional[str] = None
+    output_format_id: Optional[str] = None
+    requires_competitor_verification: Optional[bool] = None
+    active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class ReportTypeOut(ReportTypeBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    output_format: Optional[OutputFormatOut] = None
 
     class Config:
         from_attributes = True
@@ -144,7 +187,8 @@ class JobCreate(BaseModel):
     prompt_id: str
     model_id: str
     input_url: str
-    report_template: str = "pdp-audit-v1"
+    report_type_id: Optional[str] = None
+    verify_competitors: Optional[bool] = None  # None ⇒ inherit from report type
 
 
 class JobOut(BaseModel):
@@ -152,9 +196,10 @@ class JobOut(BaseModel):
     customer_id: str
     prompt_id: str
     model_id: str
-    report_template: str = "pdp-audit-v1"
+    report_type_id: Optional[str] = None
     input_url: str
     pdp_data: Optional[Dict[str, Any]] = None
+    competitor_verification: Optional[Dict[str, Any]] = None
     prompt_rendered: Optional[str] = None
     output: Optional[str] = None
     output_tokens: Optional[int] = None
@@ -167,6 +212,7 @@ class JobOut(BaseModel):
     customer: Optional[CustomerOut] = None
     prompt: Optional[PromptOut] = None
     model: Optional[AIModelOut] = None
+    report_type: Optional[ReportTypeOut] = None
 
     class Config:
         from_attributes = True

@@ -3,9 +3,10 @@ AI service: routes requests to the correct provider and streams tokens.
 """
 import os
 from typing import AsyncGenerator, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import ensure_backend_env_loaded
+
+ensure_backend_env_loaded()
 
 
 async def stream_openai(

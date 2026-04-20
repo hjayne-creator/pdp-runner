@@ -48,6 +48,14 @@ def update_prompt(prompt_id: str, body: schemas.PromptUpdate, db: Session = Depe
         raise HTTPException(404, detail="Prompt not found")
 
     updates = body.model_dump(exclude_unset=True)
+    if "customer_id" in updates:
+        new_cid = updates["customer_id"]
+        if not new_cid:
+            raise HTTPException(400, detail="customer_id cannot be empty")
+        cust = db.query(models.Customer).filter(models.Customer.id == new_cid).first()
+        if not cust:
+            raise HTTPException(404, detail="Customer not found")
+
     if "content" in updates:
         # Bump version on content change
         prompt.version = prompt.version + 1

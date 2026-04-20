@@ -59,7 +59,7 @@ export function HistoryListPage() {
           <History className="w-10 h-10 mx-auto mb-3 text-gray-300" />
           <p className="font-medium text-gray-500">No jobs yet</p>
           <p className="text-sm mt-1">Run your first analysis to see results here.</p>
-          <Link to="/" className="btn-primary mt-4 inline-flex">Run Analysis</Link>
+          <Link to="/run" className="btn-primary mt-4 inline-flex">Run Analysis</Link>
         </div>
       )}
 
@@ -125,7 +125,7 @@ export function HistoryDetailPage() {
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<'output' | 'prompt' | null>(null);
-  const [tab, setTab] = useState<'output' | 'prompt' | 'pdp'>('output');
+  const [tab, setTab] = useState<'output' | 'prompt' | 'pdp' | 'verification'>('output');
   const outputPdfRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -166,8 +166,9 @@ export function HistoryDetailPage() {
     { id: 'output', label: 'Report' },
     { id: 'prompt', label: 'Rendered Prompt' },
     { id: 'pdp', label: 'PDP Data' },
+    { id: 'verification', label: 'Competitor audit' },
   ] as const;
-  const template = getKnownReportTemplate(job.report_template);
+  const template = getKnownReportTemplate(job.report_type?.output_format?.key);
   const parsedReport = template ? template.parse(job.output ?? '') : null;
 
   return (
@@ -288,6 +289,13 @@ export function HistoryDetailPage() {
                 ? JSON.stringify(job.pdp_data, null, 2)
                 : <span className="text-gray-400 italic">No PDP data</span>
               }
+            </pre>
+          )}
+          {tab === 'verification' && (
+            <pre className="text-xs text-gray-700 font-mono whitespace-pre-wrap leading-relaxed">
+              {job.competitor_verification
+                ? JSON.stringify(job.competitor_verification, null, 2)
+                : <span className="text-gray-400 italic">Competitor verification was not enabled for this job.</span>}
             </pre>
           )}
         </div>
