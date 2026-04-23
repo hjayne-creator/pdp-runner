@@ -47,7 +47,8 @@ _GTIN_KEY = re.compile(
 )
 _MPN_KEY = re.compile(
     r"\bmpn\b|manufacturer\s*part|mfr\.?\s*part|part\s*#|model\s*#|"
-    r"item\s*#|oem|supplier\s*sku|vendor\s*sku",
+    r"item\s*#|oem|supplier\s*sku|vendor\s*sku|manufacturer\s*series|"
+    r"series|family|model$|product\s*code|code$",
     re.I,
 )
 _BRAND_KEY = re.compile(
@@ -123,7 +124,40 @@ def _collect_mpns(pdp_data: dict) -> list[str]:
         if len(n) >= 3 and n not in seen:
             seen.add(n)
             out.append(n)
+
+    # Fallback: extract model-like tokens from prominent text fields.
+    # This recovers common identifiers like "LRS-150F-12" that may appear
+    # only in URL/title and not under strict MPN attribute keys.
+    blobs = [
+        pdp_data.get("title") or "",
+        pdp_data.get("url") or "",
+        pdp_data.get("raw_text") or "",
+    ]
+    for blob in blobs:
+        if not blob:
+            continue
+        for m in re.finditer(
+            r"\b(?=[A-Za-z0-9-]{6,})(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*\d)"
+            r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+){1,5}\b",
+            str(blob),
+        ):
+            tok = m.group(0)
+            n = _norm_mpn(tok)
+            if len(n) >= 6 and n not in seen:
+                seen.add(n)
+                out.append(n)
     return out
+
+
+def _relaxed_mpn(s: str) -> str:
+    """
+    Relaxed model normalization for light variant-letter tolerance.
+    Example: LRS-150F-12 -> lrs15012.
+    """
+    n = _norm_mpn(s)
+    if not n:
+        return ""
+    return re.sub(r"(?<=\d)[a-z](?=\d)", "", n)
 
 
 def _collect_brands(pdp_data: dict) -> list[str]:
@@ -260,6 +294,12 @@ def _verify_candidate(
         sm_set = set(subject_mpns)
         cm_set = set(c_mpns)
         m_ok = bool(sm_set & cm_set)
+        if not m_ok:
+            sm_rel = {_relaxed_mpn(x) for x in sm_set}
+            cm_rel = {_relaxed_mpn(x) for x in cm_set}
+            sm_rel.discard("")
+            cm_rel.discard("")
+            m_ok = bool(sm_rel & cm_rel)
         if not m_ok:
             attrs = cand.get("attributes") or {}
             flat = "".join(_norm_mpn(str(v)) for v in attrs.values())
