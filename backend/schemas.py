@@ -147,7 +147,7 @@ class ReportTypeBase(BaseModel):
     workflow: str = "retail"
     icon: Optional[str] = None
     default_prompt_id: Optional[str] = None
-    output_format_id: Optional[str] = None
+    report_definition_id: Optional[str] = None
     requires_competitor_verification: bool = False
     active: bool = True
     sort_order: int = 100
@@ -164,7 +164,7 @@ class ReportTypeUpdate(BaseModel):
     workflow: Optional[str] = None
     icon: Optional[str] = None
     default_prompt_id: Optional[str] = None
-    output_format_id: Optional[str] = None
+    report_definition_id: Optional[str] = None
     requires_competitor_verification: Optional[bool] = None
     active: Optional[bool] = None
     sort_order: Optional[int] = None
@@ -174,7 +174,7 @@ class ReportTypeOut(ReportTypeBase):
     id: str
     created_at: datetime
     updated_at: datetime
-    output_format: Optional[OutputFormatOut] = None
+    report_definition: Optional["ReportDefinitionOut"] = None
 
     class Config:
         from_attributes = True
@@ -189,6 +189,35 @@ class JobCreate(BaseModel):
     input_url: str
     report_type_id: Optional[str] = None
     verify_competitors: Optional[bool] = None  # None ⇒ inherit from report type
+    selected_competitor_urls: Optional[List[str]] = None
+
+
+class CompetitorVerifyCreate(BaseModel):
+    input_url: str
+    report_type_id: Optional[str] = None
+    verify_competitors: Optional[bool] = None  # None ⇒ inherit from report type
+
+
+class VerifiedCompetitorOption(BaseModel):
+    url: str
+    title: Optional[str] = None
+    price: Optional[str] = None
+    reason: str
+    match_rate: float
+    snippet: Optional[str] = None
+    scrape_source: Optional[str] = None
+
+
+class CompetitorVerifyOut(BaseModel):
+    verification_enabled: bool
+    verification_run: bool
+    skipped: bool
+    skip_reason: Optional[str] = None
+    summary_message: str
+    total_candidates: int
+    total_verified: int
+    options: List[VerifiedCompetitorOption] = []
+    competitor_audit: Optional[Dict[str, Any]] = None
 
 
 class JobOut(BaseModel):
@@ -197,6 +226,10 @@ class JobOut(BaseModel):
     prompt_id: str
     model_id: str
     report_type_id: Optional[str] = None
+    report_definition_id: Optional[str] = None
+    report_definition_version: Optional[int] = None
+    report_definition_snapshot: Optional[Dict[str, Any]] = None
+    report_parse_warnings: Optional[List[str]] = None
     input_url: str
     pdp_data: Optional[Dict[str, Any]] = None
     competitor_verification: Optional[Dict[str, Any]] = None
@@ -218,6 +251,74 @@ class JobOut(BaseModel):
         from_attributes = True
 
 
+# ── Report Sections & Definitions ─────────────────────────────────────────────
+
+class ReportSectionBase(BaseModel):
+    key: str
+    label: str
+    description: Optional[str] = None
+    schema_json: Dict[str, Any] = {}
+    ui_renderer_key: str = "generic"
+    active: bool = True
+    sort_order: int = 100
+
+
+class ReportSectionOut(ReportSectionBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReportDefinitionSectionIn(BaseModel):
+    report_section_id: str
+    position: int
+
+
+class ReportDefinitionSectionOut(BaseModel):
+    id: str
+    report_section_id: str
+    position: int
+    report_section: ReportSectionOut
+
+    class Config:
+        from_attributes = True
+
+
+class ReportDefinitionBase(BaseModel):
+    key: str
+    name: str
+    description: Optional[str] = None
+    active: bool = True
+    sort_order: int = 100
+
+
+class ReportDefinitionCreate(ReportDefinitionBase):
+    sections: List[ReportDefinitionSectionIn] = []
+
+
+class ReportDefinitionUpdate(BaseModel):
+    key: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    active: Optional[bool] = None
+    sort_order: Optional[int] = None
+    sections: Optional[List[ReportDefinitionSectionIn]] = None
+
+
+class ReportDefinitionOut(ReportDefinitionBase):
+    id: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    sections: List[ReportDefinitionSectionOut] = []
+
+    class Config:
+        from_attributes = True
+
+
 # ── PDP ───────────────────────────────────────────────────────────────────────
 
 class PDPData(BaseModel):
@@ -229,3 +330,6 @@ class PDPData(BaseModel):
     images: List[str] = []
     raw_text: Optional[str] = None
     error: Optional[str] = None
+
+
+ReportTypeOut.model_rebuild()

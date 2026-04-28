@@ -50,6 +50,22 @@ def ensure_schema() -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN report_type_id VARCHAR"
                 )
+            if "report_definition_id" not in job_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN report_definition_id VARCHAR"
+                )
+            if "report_definition_version" not in job_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN report_definition_version INTEGER"
+                )
+            if "report_definition_snapshot" not in job_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN report_definition_snapshot JSON"
+                )
+            if "report_parse_warnings" not in job_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN report_parse_warnings JSON"
+                )
 
         # Migrate legacy report_templates → report_types (one-time copy).
         if _table_exists(conn, "report_templates") and _table_exists(conn, "report_types"):
@@ -130,12 +146,17 @@ def ensure_schema() -> None:
             has_legacy_renderer = "output_renderer" in rt_cols
             has_legacy_contract = "output_contract" in rt_cols
             has_format_fk = "output_format_id" in rt_cols
+            has_definition_fk = "report_definition_id" in rt_cols
 
             if not has_format_fk:
                 conn.exec_driver_sql(
                     "ALTER TABLE report_types ADD COLUMN output_format_id VARCHAR"
                 )
                 has_format_fk = True
+            if not has_definition_fk:
+                conn.exec_driver_sql(
+                    "ALTER TABLE report_types ADD COLUMN report_definition_id VARCHAR"
+                )
 
             # If there's still a legacy (renderer, contract) pair on each row,
             # find or create matching OutputFormat rows and link.

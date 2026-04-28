@@ -6,10 +6,13 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { api } from '../api/client';
-import type { Prompt, AIModel, SSEEvent, ReportType } from '../api/types';
+import type {
+  Prompt, AIModel, SSEEvent, ReportType, VerifiedCompetitorOption, CompetitorVerifyResult,
+} from '../api/types';
 import type { HomeToRunnerIntent, RunnerPrefillState } from '../utils/workflow';
 import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
-import { getKnownReportTemplate } from '../utils/reportTemplates';
+import { Modal } from '../components/Modal';
+import { DynamicReportView } from '../components/DynamicReportView';
 
 type Status = 'idle' | 'fetching' | 'running' | 'done' | 'error';
 
@@ -51,6 +54,14 @@ export function RunnerPage() {
   const [durationMs, setDurationMs] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [homeHandoff, setHomeHandoff] = useState<HomeHandoff | null>(null);
+  const [competitorSelectionOpen, setCompetitorSelectionOpen] = useState(false);
+  const [competitorOptions, setCompetitorOptions] = useState<VerifiedCompetitorOption[]>([]);
+  const [selectedCompetitorUrls, setSelectedCompetitorUrls] = useState<string[]>([]);
+  const [competitorSummary, setCompetitorSummary] = useState('');
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [precheckBadge, setPrecheckBadge] = useState<
+    'idle' | 'running' | 'completed' | 'skipped'
+  >('idle');
 
   const outputRef = useRef<HTMLDivElement>(null);
   const pdfContentRef = useRef<HTMLDivElement>(null);
@@ -174,17 +185,12 @@ export function RunnerPage() {
     : Boolean(selectedReportType?.requires_competitor_verification);
 
   const canRun =
-    url.trim() && jobCustomerId && promptId && modelId && reportTypeId && status !== 'running';
+    url.trim() && jobCustomerId && promptId && modelId && reportTypeId && status !== 'running' && !preflightLoading;
 
-  const handleRun = useCallback(async () => {
-    if (!canRun) return;
-
-    setHomeHandoff((h) => (h ? { ...h, dismissed: true } : h));
-
+  const runStream = useCallback(async (selectedUrls?: string[]) => {
     abortRef.current = new AbortController();
     setStatus('fetching');
     setOutput('');
-    setStatusMessages([]);
     setJobId(null);
     setDurationMs(null);
 
@@ -197,6 +203,7 @@ export function RunnerPage() {
           input_url: url.trim(),
           report_type_id: reportTypeId,
           verify_competitors: verifyOverride,
+          selected_competitor_urls: selectedUrls ?? null,
         },
         (event: SSEEvent) => {
           if (event.type === 'status') {
@@ -226,11 +233,101 @@ export function RunnerPage() {
         setStatus('error');
       }
     }
-  }, [canRun, url, jobCustomerId, promptId, modelId, reportTypeId, verifyOverride]);
+  }, [jobCustomerId, promptId, modelId, url, reportTypeId, verifyOverride]);
+
+  const maybeRunCompetitorPrecheck = useCallback(async (): Promise<CompetitorVerifyResult | null> => {
+    if (!verifyEffective) {
+      setPrecheckBadge('skipped');
+      setStatusMessages((m) => [
+        ...m,
+        { type: 'status', message: 'Competitor verification not selected; continuing without competitor context.' },
+      ]);
+      return null;
+    }
+
+    setPreflightLoading(true);
+    setPrecheckBadge('running');
+    setStatus('fetching');
+    setStatusMessages((m) => [...m, { type: 'status', message: 'Verifying competitor PDPs before run...' }]);
+    try {
+      const result = await api.jobs.verifyCompetitors({
+        input_url: url.trim(),
+        report_type_id: reportTypeId,
+        verify_competitors: verifyOverride,
+      });
+      setPrecheckBadge(result.skipped ? 'skipped' : 'completed');
+      setStatusMessages((m) => [...m, { type: result.skipped ? 'warning' : 'status', message: result.summary_message }]);
+      return result;
+    } finally {
+      setPreflightLoading(false);
+    }
+  }, [verifyEffective, url, reportTypeId, verifyOverride]);
+
+  const handleRun = useCallback(async () => {
+    if (!canRun) return;
+
+    setHomeHandoff((h) => (h ? { ...h, dismissed: true } : h));
+
+    setOutput('');
+    setStatusMessages([]);
+    setJobId(null);
+    setDurationMs(null);
+    setCompetitorSelectionOpen(false);
+    setCompetitorOptions([]);
+    setSelectedCompetitorUrls([]);
+    setCompetitorSummary('');
+    setPrecheckBadge('idle');
+
+    try {
+      const precheck = await maybeRunCompetitorPrecheck();
+      if (precheck?.verification_enabled && precheck.options.length > 0) {
+        setCompetitorOptions(precheck.options);
+        setSelectedCompetitorUrls(precheck.options.map((o) => o.url));
+        setCompetitorSummary(precheck.summary_message);
+        setCompetitorSelectionOpen(true);
+        setStatus('idle');
+        return;
+      }
+
+      await runStream();
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setStatus('idle');
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatusMessages((m) => [...m, { type: 'error', message: msg }]);
+        setStatus('error');
+      }
+    }
+  }, [canRun, maybeRunCompetitorPrecheck, runStream]);
 
   const handleStop = () => {
     abortRef.current?.abort();
     setStatus('idle');
+  };
+
+  const toggleCompetitor = (u: string, checked: boolean) => {
+    setSelectedCompetitorUrls((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(u);
+      else next.delete(u);
+      return Array.from(next);
+    });
+  };
+
+  const continueWithSelectedCompetitors = async () => {
+    setCompetitorSelectionOpen(false);
+    setStatusMessages((m) => [
+      ...m,
+      {
+        type: 'status',
+        message:
+          selectedCompetitorUrls.length > 0
+            ? `Including ${selectedCompetitorUrls.length} selected verified competitor PDP(s).`
+            : 'No competitors selected; continuing without competitor context.',
+      },
+    ]);
+    await runStream(selectedCompetitorUrls);
   };
 
   const handleCopy = () => {
@@ -258,10 +355,21 @@ export function RunnerPage() {
   };
 
   const selectedModel = models.find((m) => m.id === modelId);
-  const renderer = selectedReportType?.output_format?.key
-    ? getKnownReportTemplate(selectedReportType.output_format.key)
-    : null;
-  const parsedReport = renderer ? renderer.parse(output) : null;
+  const parsedJson = useMemo(() => {
+    if (!output) return null;
+    try {
+      const trimmed = output.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) return JSON.parse(trimmed) as Record<string, unknown>;
+      const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      if (m?.[1]) return JSON.parse(m[1]) as Record<string, unknown>;
+      const first = trimmed.indexOf('{');
+      const last = trimmed.lastIndexOf('}');
+      if (first >= 0 && last > first) return JSON.parse(trimmed.slice(first, last + 1)) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    return null;
+  }, [output]);
 
   const activeHandoff = homeHandoff && !homeHandoff.dismissed ? homeHandoff : null;
   const emphasizeRun = activeHandoff?.intent === 'review_and_run' && status === 'idle';
@@ -272,6 +380,72 @@ export function RunnerPage() {
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
+      <Modal
+        open={competitorSelectionOpen}
+        onClose={() => {
+          setSelectedCompetitorUrls([]);
+          void continueWithSelectedCompetitors();
+        }}
+        title="Select verified competitors to include"
+        size="lg"
+      >
+        <p className="text-sm text-gray-600 mb-3">{competitorSummary}</p>
+        {competitorOptions.length === 0 ? (
+          <p className="text-sm text-gray-500">No verified competitors found.</p>
+        ) : (
+          <div className="space-y-3">
+            {competitorOptions.map((opt) => (
+              <label key={opt.url} className="block rounded-lg border border-gray-200 p-3 hover:bg-gray-50">
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                    checked={selectedCompetitorUrls.includes(opt.url)}
+                    onChange={(e) => toggleCompetitor(opt.url, e.target.checked)}
+                  />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{opt.title || opt.url}</p>
+                    <a
+                      href={opt.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-xs text-brand-600 break-all hover:underline"
+                      title="Open competitor product page"
+                    >
+                      {opt.url}
+                    </a>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-600">
+                      <span>Match rate: {(opt.match_rate * 100).toFixed(0)}%</span>
+                      <span>Reason: {opt.reason}</span>
+                      {opt.price ? <span>Price: {opt.price}</span> : null}
+                      {opt.scrape_source ? <span>Source: {opt.scrape_source}</span> : null}
+                    </div>
+                    {opt.snippet ? (
+                      <p className="mt-1 text-xs text-gray-500 line-clamp-3">{opt.snippet}</p>
+                    ) : null}
+                  </div>
+                </div>
+              </label>
+            ))}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                className="btn-secondary px-3 py-2 text-sm"
+                onClick={() => setSelectedCompetitorUrls([])}
+              >
+                Select none
+              </button>
+              <button
+                type="button"
+                className="btn-primary px-3 py-2 text-sm"
+                onClick={continueWithSelectedCompetitors}
+              >
+                Continue run
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
       <div className="flex flex-col xl:flex-row gap-6 min-h-[calc(100vh-5rem)]">
 
         {/* ── LEFT: Input Panel ──────────────────────────────────────────── */}
@@ -552,6 +726,24 @@ export function RunnerPage() {
                   Error
                 </span>
               )}
+              {precheckBadge === 'running' && (
+                <span className="badge-blue gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Competitor Precheck
+                </span>
+              )}
+              {precheckBadge === 'completed' && (
+                <span className="badge-green gap-1" title="Competitor precheck completed">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Precheck Complete
+                </span>
+              )}
+              {precheckBadge === 'skipped' && (
+                <span className="badge-gray gap-1" title="Competitor precheck skipped">
+                  <AlertCircle className="w-3 h-3" />
+                  Precheck Skipped
+                </span>
+              )}
               {durationMs != null && (
                 <span className="badge-gray gap-1">
                   <Clock className="w-3 h-3" />
@@ -618,8 +810,8 @@ export function RunnerPage() {
 
             {output && (
               <div ref={pdfContentRef} className="bg-white rounded-lg p-4 shadow-sm">
-                {renderer && parsedReport && status !== 'running' ? (
-                  <>{renderer.render(parsedReport)}</>
+                {selectedReportType?.report_definition && parsedJson && status !== 'running' ? (
+                  <DynamicReportView definition={selectedReportType.report_definition} parsedOutput={parsedJson} />
                 ) : (
                   <div
                     className={clsx(

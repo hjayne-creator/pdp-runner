@@ -8,7 +8,7 @@ import { clsx } from 'clsx';
 import { api } from '../api/client';
 import type { Job } from '../api/types';
 import { downloadHtmlElementAsPdf } from '../utils/aiOutputPdf';
-import { getKnownReportTemplate } from '../utils/reportTemplates';
+import { DynamicReportView } from '../components/DynamicReportView';
 
 function StatusBadge({ status }: { status: Job['status'] }) {
   if (status === 'completed') return <span className="badge-green gap-1"><CheckCircle2 className="w-3 h-3" />Completed</span>;
@@ -168,8 +168,21 @@ export function HistoryDetailPage() {
     { id: 'pdp', label: 'PDP Data' },
     { id: 'verification', label: 'Competitor audit' },
   ] as const;
-  const template = getKnownReportTemplate(job.report_type?.output_format?.key);
-  const parsedReport = template ? template.parse(job.output ?? '') : null;
+  const parsedJson = (() => {
+    if (!job.output) return null;
+    try {
+      const trimmed = job.output.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) return JSON.parse(trimmed) as Record<string, unknown>;
+      const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      if (m?.[1]) return JSON.parse(m[1]) as Record<string, unknown>;
+      const first = trimmed.indexOf('{');
+      const last = trimmed.lastIndexOf('}');
+      if (first >= 0 && last > first) return JSON.parse(trimmed.slice(first, last + 1)) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    return null;
+  })();
 
   return (
     <div className="max-w-screen-xl mx-auto px-4 sm:px-6 py-6">
@@ -217,6 +230,15 @@ export function HistoryDetailPage() {
           <div className="mt-3 bg-red-50 border border-red-100 rounded-lg px-4 py-3 text-sm text-red-700">
             <AlertCircle className="w-4 h-4 inline mr-1.5 -mt-0.5" />
             {job.error}
+          </div>
+        )}
+        {job.report_parse_warnings && job.report_parse_warnings.length > 0 && (
+          <div className="mt-3 bg-yellow-50 border border-yellow-100 rounded-lg px-4 py-3 text-sm text-yellow-800">
+            <AlertCircle className="w-4 h-4 inline mr-1.5 -mt-0.5" />
+            Parse warnings:
+            <ul className="list-disc pl-5 mt-1 space-y-1">
+              {job.report_parse_warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
           </div>
         )}
       </div>
@@ -269,8 +291,8 @@ export function HistoryDetailPage() {
         <div className="p-5 overflow-auto max-h-[60vh]">
           {tab === 'output' && (
             <div ref={outputPdfRef} className="bg-white rounded-lg p-4">
-              {template && parsedReport ? (
-                <>{template.render(parsedReport)}</>
+              {job.report_definition_snapshot && parsedJson ? (
+                <DynamicReportView definition={job.report_definition_snapshot} parsedOutput={parsedJson} />
               ) : (
                 <pre className="output-prose text-sm text-gray-800 whitespace-pre-wrap">
                   {job.output || <span className="text-gray-400 italic">No output</span>}

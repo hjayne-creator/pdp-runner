@@ -1,5 +1,6 @@
 import type {
-  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent, ReportType, OutputFormat,
+  Customer, Prompt, AIModel, Job, JobCreate, SSEEvent, ReportType,
+  CompetitorVerifyCreate, CompetitorVerifyResult, ReportDefinition, ReportSection,
 } from './types';
 
 const BASE = '/api';
@@ -110,6 +111,11 @@ export const api = {
         }
       }
     },
+    verifyCompetitors: (body: CompetitorVerifyCreate) =>
+      req<CompetitorVerifyResult>('/jobs/verify-competitors', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
 
   reportTypes: {
@@ -120,26 +126,46 @@ export const api = {
       return req<ReportType[]>(`/report-types/?${search}`);
     },
     get: (id: string) => req<ReportType>(`/report-types/${id}`),
-    create: (body: Omit<ReportType, 'id' | 'created_at' | 'updated_at' | 'output_format'>) =>
+    create: (body: Omit<ReportType, 'id' | 'created_at' | 'updated_at' | 'output_format' | 'report_definition'>) =>
       req<ReportType>('/report-types/', { method: 'POST', body: JSON.stringify(body) }),
-    update: (id: string, body: Partial<Omit<ReportType, 'output_format'>>) =>
+    update: (id: string, body: Partial<Omit<ReportType, 'output_format' | 'report_definition'>>) =>
       req<ReportType>(`/report-types/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     delete: (id: string) =>
       req<{ ok: boolean }>(`/report-types/${id}`, { method: 'DELETE' }),
   },
 
-  outputFormats: {
+  reportSections: {
     list: (params: { activeOnly?: boolean } = {}) => {
       const search = new URLSearchParams();
-      if (params.activeOnly) search.set('active_only', 'true');
-      return req<OutputFormat[]>(`/output-formats/?${search}`);
+      if (params.activeOnly !== false) search.set('active_only', 'true');
+      return req<ReportSection[]>(`/report-sections/?${search}`);
     },
-    get: (id: string) => req<OutputFormat>(`/output-formats/${id}`),
-    create: (body: Omit<OutputFormat, 'id' | 'created_at' | 'updated_at'>) =>
-      req<OutputFormat>('/output-formats/', { method: 'POST', body: JSON.stringify(body) }),
-    update: (id: string, body: Partial<OutputFormat>) =>
-      req<OutputFormat>(`/output-formats/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  },
+
+  reportDefinitions: {
+    list: (params: { activeOnly?: boolean } = {}) => {
+      const search = new URLSearchParams();
+      if (params.activeOnly !== false) search.set('active_only', 'true');
+      return req<ReportDefinition[]>(`/report-definitions/?${search}`);
+    },
+    get: (id: string) => req<ReportDefinition>(`/report-definitions/${id}`),
+    create: (body: {
+      key: string;
+      name: string;
+      description?: string;
+      active: boolean;
+      sort_order: number;
+      sections: Array<{ report_section_id: string; position: number }>;
+    }) => req<ReportDefinition>('/report-definitions/', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: Partial<{
+      key: string;
+      name: string;
+      description?: string;
+      active: boolean;
+      sort_order: number;
+      sections: Array<{ report_section_id: string; position: number }>;
+    }>) => req<ReportDefinition>(`/report-definitions/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     delete: (id: string) =>
-      req<{ ok: boolean }>(`/output-formats/${id}`, { method: 'DELETE' }),
+      req<{ ok: boolean }>(`/report-definitions/${id}`, { method: 'DELETE' }),
   },
 };

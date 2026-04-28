@@ -10,7 +10,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from database import engine, ensure_schema
 import models
-from routers import customers, prompts, ai_models, jobs, report_types, output_formats
+from routers import (
+    customers,
+    prompts,
+    ai_models,
+    jobs,
+    report_types,
+    report_sections,
+    report_definitions,
+)
 from seed import seed
 
 # Create tables
@@ -55,7 +63,8 @@ app.include_router(prompts.router, prefix="/api")
 app.include_router(ai_models.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(report_types.router, prefix="/api")
-app.include_router(output_formats.router, prefix="/api")
+app.include_router(report_sections.router, prefix="/api")
+app.include_router(report_definitions.router, prefix="/api")
 
 
 @app.get("/api/health")

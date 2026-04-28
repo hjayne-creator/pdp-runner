@@ -17,16 +17,24 @@ def _validate_default_prompt(db: Session, prompt_id: str | None) -> None:
         raise HTTPException(404, detail=f"Default prompt '{prompt_id}' not found")
 
 
-def _validate_output_format(db: Session, format_id: str | None) -> None:
-    if not format_id:
+def _validate_report_definition(db: Session, definition_id: str | None) -> None:
+    if not definition_id:
         return
-    exists = db.query(models.OutputFormat).filter(models.OutputFormat.id == format_id).first()
+    exists = (
+        db.query(models.ReportDefinition)
+        .filter(models.ReportDefinition.id == definition_id)
+        .first()
+    )
     if not exists:
-        raise HTTPException(404, detail=f"Output format '{format_id}' not found")
+        raise HTTPException(404, detail=f"Report definition '{definition_id}' not found")
 
 
 def _base_query(db: Session):
-    return db.query(models.ReportType).options(joinedload(models.ReportType.output_format))
+    return db.query(models.ReportType).options(
+        joinedload(models.ReportType.report_definition).joinedload(
+            models.ReportDefinition.sections
+        ).joinedload(models.ReportDefinitionSection.report_section),
+    )
 
 
 @router.get("/", response_model=List[schemas.ReportTypeOut])
@@ -56,7 +64,7 @@ def create_report_type(body: schemas.ReportTypeCreate, db: Session = Depends(get
     if db.query(models.ReportType).filter(models.ReportType.key == body.key).first():
         raise HTTPException(400, detail=f"Report type key '{body.key}' already exists")
     _validate_default_prompt(db, body.default_prompt_id)
-    _validate_output_format(db, body.output_format_id)
+    _validate_report_definition(db, body.report_definition_id)
     rt = models.ReportType(**body.model_dump())
     db.add(rt)
     db.commit()
@@ -83,8 +91,8 @@ def update_report_type(
             raise HTTPException(400, detail=f"Report type key '{updates['key']}' already exists")
     if "default_prompt_id" in updates:
         _validate_default_prompt(db, updates["default_prompt_id"])
-    if "output_format_id" in updates:
-        _validate_output_format(db, updates["output_format_id"])
+    if "report_definition_id" in updates:
+        _validate_report_definition(db, updates["report_definition_id"])
 
     for k, v in updates.items():
         setattr(rt, k, v)

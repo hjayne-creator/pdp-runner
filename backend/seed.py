@@ -17,6 +17,24 @@ from services.report_templates import OUTPUT_CONTRACTS
 # Marks that built-in retail defaults were applied; checked before any bootstrap I/O.
 RETAIL_BOOTSTRAP_SETTING_KEY = "retail_bootstrap_v1"
 
+REPORT_SECTION_SPECS = [
+    {"key": "analysis_metadata", "label": "Analysis metadata", "ui_renderer_key": "object", "sort_order": 10},
+    {"key": "executive_summary", "label": "Executive summary", "ui_renderer_key": "text", "sort_order": 20},
+    {"key": "risk_level", "label": "Risk level", "ui_renderer_key": "text", "sort_order": 30},
+    {"key": "benchmark_summary", "label": "Benchmark summary", "ui_renderer_key": "object", "sort_order": 40},
+    {"key": "competitors", "label": "Competitors", "ui_renderer_key": "list", "sort_order": 50},
+    {"key": "content_gap_analysis", "label": "Content gap analysis", "ui_renderer_key": "object", "sort_order": 60},
+    {"key": "recommended_content_additions", "label": "Recommended content additions", "ui_renderer_key": "object", "sort_order": 70},
+    {"key": "generated_content", "label": "Generated content", "ui_renderer_key": "object", "sort_order": 80},
+    {"key": "top_issues", "label": "Top issues", "ui_renderer_key": "list", "sort_order": 90},
+    {"key": "top_opportunities", "label": "Top opportunities", "ui_renderer_key": "list", "sort_order": 100},
+    {"key": "quick_wins", "label": "Quick wins", "ui_renderer_key": "list", "sort_order": 110},
+    {"key": "strategic_recommendations", "label": "Strategic recommendations", "ui_renderer_key": "list", "sort_order": 120},
+    {"key": "publish_readiness", "label": "Publish readiness", "ui_renderer_key": "text", "sort_order": 130},
+    {"key": "confidence_score", "label": "Confidence score", "ui_renderer_key": "number", "sort_order": 140},
+    {"key": "sources", "label": "Sources", "ui_renderer_key": "list", "sort_order": 150},
+]
+
 # Built-in OutputFormats. ``key`` doubles as the frontend renderer lookup.
 OUTPUT_FORMAT_SPECS = [
     {
@@ -82,7 +100,7 @@ Product URL: {{URL}}
 
 {{VERIFIED_COMPETITOR_CONTEXT}}
 
-Follow the output structure exactly:
+Follow the output structure:
 {{OUTPUT_CONTRACT}}
 """
 
@@ -96,7 +114,7 @@ Product URL: {{URL}}
 
 {{VERIFIED_COMPETITOR_CONTEXT}}
 
-Follow the output structure exactly:
+Follow the output structure:
 {{OUTPUT_CONTRACT}}
 """
 
@@ -231,10 +249,104 @@ def _ensure_tenant(db) -> models.Customer:
     return cust
 
 
+def _ensure_report_sections(db) -> dict[str, models.ReportSection]:
+    by_key: dict[str, models.ReportSection] = {}
+    for spec in REPORT_SECTION_SPECS:
+        row = db.query(models.ReportSection).filter(models.ReportSection.key == spec["key"]).first()
+        if not row:
+            row = models.ReportSection(
+                key=spec["key"],
+                label=spec["label"],
+                description=spec["label"],
+                schema_json={},
+                ui_renderer_key=spec["ui_renderer_key"],
+                active=True,
+                sort_order=spec["sort_order"],
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        by_key[spec["key"]] = row
+    return by_key
+
+
+def _ensure_report_definitions(db) -> dict[str, models.ReportDefinition]:
+    sections = _ensure_report_sections(db)
+    specs = [
+        {
+            "key": "pdp-gap-analysis-v1",
+            "name": "PDP Gap Analysis",
+            "sort_order": 20,
+            "section_keys": [
+                "analysis_metadata",
+                "executive_summary",
+                "competitors",
+                "content_gap_analysis",
+                "recommended_content_additions",
+                "sources",
+            ],
+        },
+        {
+            "key": "pdp-gap-analysis-rewrite-v1",
+            "name": "PDP Gap Analysis + Rewrite",
+            "sort_order": 30,
+            "section_keys": [
+                "analysis_metadata",
+                "executive_summary",
+                "competitors",
+                "content_gap_analysis",
+                "recommended_content_additions",
+                "generated_content",
+                "sources",
+            ],
+        },
+        {
+            "key": "pdp-ai-rewrite-v1",
+            "name": "PDP AI Rewrite",
+            "sort_order": 10,
+            "section_keys": ["sources"],
+        },
+    ]
+    by_key: dict[str, models.ReportDefinition] = {}
+    for spec in specs:
+        row = db.query(models.ReportDefinition).filter(models.ReportDefinition.key == spec["key"]).first()
+        if not row:
+            row = models.ReportDefinition(
+                key=spec["key"],
+                name=spec["name"],
+                description=f"{spec['name']} definition",
+                version=1,
+                active=True,
+                sort_order=spec["sort_order"],
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        existing = db.query(models.ReportDefinitionSection).filter(
+            models.ReportDefinitionSection.report_definition_id == row.id
+        ).first()
+        if not existing:
+            for idx, sec_key in enumerate(spec["section_keys"], start=1):
+                sec = sections.get(sec_key)
+                if not sec:
+                    continue
+                db.add(
+                    models.ReportDefinitionSection(
+                        report_definition_id=row.id,
+                        report_section_id=sec.id,
+                        position=idx * 10,
+                    )
+                )
+            db.commit()
+        by_key[spec["key"]] = row
+    return by_key
+
+
 def _ensure_retail_seed(db) -> None:
     """Idempotently ensure retail prompts + report types exist and are linked."""
     cust = _ensure_tenant(db)
     formats = _ensure_output_formats(db)
+    definitions = _ensure_report_definitions(db)
 
     for spec in RETAIL_SEED_SPECS:
         fmt = formats[spec["output_format_key"]]
@@ -273,6 +385,9 @@ def _ensure_retail_seed(db) -> None:
                 icon=spec["report_icon"],
                 default_prompt_id=prompt.id,
                 output_format_id=fmt.id,
+                report_definition_id=definitions.get(spec["output_format_key"]).id
+                if definitions.get(spec["output_format_key"])
+                else None,
                 requires_competitor_verification=spec["requires_verification"],
                 active=True,
                 sort_order=spec["sort_order"],
@@ -299,6 +414,11 @@ def _ensure_retail_seed(db) -> None:
             if stale_format:
                 report.output_format_id = fmt.id
                 changed = True
+            if report.report_definition_id is None:
+                definition = definitions.get(spec["output_format_key"])
+                if definition:
+                    report.report_definition_id = definition.id
+                    changed = True
             if changed:
                 db.commit()
 
@@ -340,7 +460,11 @@ def seed(force_bootstrap: bool = False):
             print("✓ Seeded AI models")
 
         if _retail_bootstrap_done(db) and not force_bootstrap:
+            # Keep Admin-owned bootstrap data untouched, but still ensure
+            # section/definition libraries exist for newer app versions.
+            _ensure_report_definitions(db)
             print("✓ Retail bootstrap skipped (Admin data kept across restarts)")
+            print("✓ Report section/definition library ensured")
             return
 
         _ensure_retail_seed(db)

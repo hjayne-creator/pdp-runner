@@ -11,13 +11,23 @@ from sqlalchemy.orm import Session, joinedload
 from database import get_db
 import models, schemas
 from services.pdp_service import (
-    blocked_analysis_json,
     fetch_pdp,
     pdp_is_actionable,
     render_prompt,
 )
 from services.competitor_verification import run_competitor_verification
+from services.competitor_verification import (
+    build_verified_context_block,
+    match_rate_for_reason,
+    select_verified_competitors,
+)
 from services.ai_service import run_ai_stream
+from services.report_definitions import (
+    build_definition_snapshot,
+    build_contract_from_snapshot,
+    build_blocked_payload,
+    parse_output_with_warnings,
+)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 _log = logging.getLogger(__name__)
@@ -30,7 +40,8 @@ def _load_job(job_id: str, db: Session) -> models.Job:
             joinedload(models.Job.customer),
             joinedload(models.Job.prompt),
             joinedload(models.Job.model),
-            joinedload(models.Job.report_type).joinedload(models.ReportType.output_format),
+            joinedload(models.Job.report_type),
+            joinedload(models.Job.report_definition),
         )
         .filter(models.Job.id == job_id)
         .first()
@@ -53,7 +64,8 @@ def list_jobs(
             joinedload(models.Job.customer),
             joinedload(models.Job.prompt),
             joinedload(models.Job.model),
-            joinedload(models.Job.report_type).joinedload(models.ReportType.output_format),
+            joinedload(models.Job.report_type),
+            joinedload(models.Job.report_definition),
         )
         .order_by(models.Job.created_at.desc())
     )
@@ -75,6 +87,109 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
     db.delete(job)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/verify-competitors", response_model=schemas.CompetitorVerifyOut)
+async def verify_competitors(body: schemas.CompetitorVerifyCreate, db: Session = Depends(get_db)):
+    report_type_obj: Optional[models.ReportType] = None
+    if body.report_type_id:
+        report_type_obj = (
+            db.query(models.ReportType)
+            .options(
+                joinedload(models.ReportType.report_definition).joinedload(
+                    models.ReportDefinition.sections
+                ).joinedload(models.ReportDefinitionSection.report_section),
+            )
+            .filter(models.ReportType.id == body.report_type_id)
+            .first()
+        )
+        if not report_type_obj:
+            raise HTTPException(404, detail="Report type not found")
+
+    if body.verify_competitors is None:
+        verification_enabled = bool(
+            report_type_obj.requires_competitor_verification if report_type_obj else False
+        )
+    else:
+        verification_enabled = bool(body.verify_competitors)
+
+    if not verification_enabled:
+        return schemas.CompetitorVerifyOut(
+            verification_enabled=False,
+            verification_run=False,
+            skipped=True,
+            skip_reason="verification_not_selected",
+            summary_message="Competitor verification was not selected for this run.",
+            total_candidates=0,
+            total_verified=0,
+            options=[],
+            competitor_audit=None,
+        )
+
+    pdp_data = await fetch_pdp(body.input_url)
+    if not pdp_is_actionable(pdp_data):
+        reason = pdp_data.get("error") or "subject_pdp_not_actionable"
+        return schemas.CompetitorVerifyOut(
+            verification_enabled=True,
+            verification_run=False,
+            skipped=True,
+            skip_reason="subject_pdp_not_actionable",
+            summary_message=(
+                "Competitor verification skipped because the subject PDP could not be loaded reliably."
+            ),
+            total_candidates=0,
+            total_verified=0,
+            options=[],
+            competitor_audit={
+                "skipped": True,
+                "skip_reason": "subject_pdp_not_actionable",
+                "error": reason,
+                "queries_run": [],
+                "candidates": [],
+                "verified": [],
+            },
+        )
+
+    _, competitor_audit = await run_competitor_verification(pdp_data, body.input_url)
+    verified = (competitor_audit or {}).get("verified") or []
+    candidates = (competitor_audit or {}).get("candidates") or []
+    options: list[schemas.VerifiedCompetitorOption] = []
+    for row in verified:
+        options.append(
+            schemas.VerifiedCompetitorOption(
+                url=row.get("url") or "",
+                title=row.get("title"),
+                price=row.get("price"),
+                reason=row.get("reason") or "identifier_match",
+                match_rate=match_rate_for_reason(row.get("reason") or ""),
+                snippet=(row.get("snippet") or "")[:500],
+                scrape_source=row.get("scrape_source"),
+            )
+        )
+
+    skipped = bool((competitor_audit or {}).get("skipped"))
+    skip_reason = (competitor_audit or {}).get("skip_reason")
+    if options:
+        summary_message = (
+            f"Verified {len(options)} of {len(candidates)} candidate competitor PDP(s). "
+            "Select one or more to include in this run."
+        )
+    elif skipped:
+        summary_message = f"Competitor verification skipped: {skip_reason or 'unknown'}."
+    else:
+        summary_message = "No verified exact-match competitor PDPs were found."
+
+    return schemas.CompetitorVerifyOut(
+        verification_enabled=True,
+        verification_run=True,
+        skipped=skipped,
+        skip_reason=skip_reason,
+        summary_message=summary_message,
+        total_candidates=len(candidates),
+        total_verified=len(options),
+        options=options,
+        competitor_audit=competitor_audit,
+    )
 
 
 @router.post("/run")
@@ -100,7 +215,11 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
     if body.report_type_id:
         report_type_obj = (
             db.query(models.ReportType)
-            .options(joinedload(models.ReportType.output_format))
+            .options(
+                joinedload(models.ReportType.report_definition).joinedload(
+                    models.ReportDefinition.sections
+                ).joinedload(models.ReportDefinitionSection.report_section),
+            )
             .filter(models.ReportType.id == body.report_type_id)
             .first()
         )
@@ -110,7 +229,11 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         # Fallback: pick the first active report type so legacy callers still work.
         report_type_obj = (
             db.query(models.ReportType)
-            .options(joinedload(models.ReportType.output_format))
+            .options(
+                joinedload(models.ReportType.report_definition).joinedload(
+                    models.ReportDefinition.sections
+                ).joinedload(models.ReportDefinitionSection.report_section),
+            )
             .filter(models.ReportType.active == True)
             .order_by(models.ReportType.sort_order, models.ReportType.label)
             .first()
@@ -121,11 +244,11 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                 detail="No active report types configured. Create one in Admin → Report Types.",
             )
 
-    if not report_type_obj.output_format:
+    if not report_type_obj.report_definition:
         raise HTTPException(
             400,
             detail=(
-                f"Report type '{report_type_obj.label}' has no Output Format set. "
+                f"Report type '{report_type_obj.label}' has no Report Definition set. "
                 "Pick one in Admin → Report Types."
             ),
         )
@@ -137,9 +260,11 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
     model_model_id = model_obj.model_id
     model_max_tokens = model_obj.max_tokens
     model_config = dict(model_obj.config or {})
-    output_contract = report_type_obj.output_format.contract or ""
-    output_renderer = report_type_obj.output_format.key or "pdp-audit-v1"
+    definition_snapshot = build_definition_snapshot(report_type_obj.report_definition)
+    output_contract = build_contract_from_snapshot(definition_snapshot)
     report_type_id = report_type_obj.id
+    report_definition_id = report_type_obj.report_definition_id
+    report_definition_version = (definition_snapshot or {}).get("version")
     if body.verify_competitors is None:
         verify_competitors = bool(report_type_obj.requires_competitor_verification)
     else:
@@ -150,6 +275,9 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         prompt_id=body.prompt_id,
         model_id=body.model_id,
         report_type_id=report_type_id,
+        report_definition_id=report_definition_id,
+        report_definition_version=report_definition_version,
+        report_definition_snapshot=definition_snapshot,
         input_url=body.input_url,
         status="running",
     )
@@ -199,6 +327,20 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                         "=== END VERIFIED COMPETITORS ==="
                     )
                 n_ver = len((competitor_audit or {}).get("verified") or [])
+                selected_urls = body.selected_competitor_urls or []
+                if selected_urls and competitor_audit:
+                    selected_verified = select_verified_competitors(
+                        (competitor_audit.get("verified") or []),
+                        selected_urls,
+                    )
+                    competitor_audit["verified"] = selected_verified
+                    identity = (competitor_audit or {}).get("subject_identifiers") or {}
+                    had_ids = bool((identity.get("gtins") or []) or (identity.get("mpns") or []))
+                    verified_context = build_verified_context_block(
+                        selected_verified, identity, had_ids
+                    )
+                    n_ver = len(selected_verified)
+                    yield f"data: {json.dumps({'type': 'status', 'message': f'Using {n_ver} user-selected verified competitor PDP(s).'})}\n\n"
                 if competitor_audit and competitor_audit.get("skipped"):
                     reason = competitor_audit.get("skip_reason") or "unknown"
                     skip_msg = f"Competitor verification skipped: {reason}"
@@ -243,7 +385,10 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                     or "The product URL did not return usable page content after automatic retries."
                 )
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Skipping model: no usable PDP content (blocked or empty).'})}\n\n"
-                blocked = blocked_analysis_json(reason, output_renderer)
+                blocked = json.dumps(
+                    build_blocked_payload(definition_snapshot, reason),
+                    indent=2,
+                )
                 output_chunks.append(blocked)
                 yield f"data: {json.dumps({'type': 'token', 'content': blocked})}\n\n"
             else:
@@ -265,6 +410,7 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
         finally:
             duration_ms = int(time.time() * 1000) - start_ms
             full_output = "".join(output_chunks)
+            parse_warnings = parse_output_with_warnings(full_output, definition_snapshot)
 
             from database import SessionLocal
             write_db = SessionLocal()
@@ -275,6 +421,10 @@ async def run_job(body: schemas.JobCreate, db: Session = Depends(get_db)):
                     final_job.pdp_data = pdp_data
                     if verify_competitors:
                         final_job.competitor_verification = competitor_audit
+                    final_job.report_definition_id = report_definition_id
+                    final_job.report_definition_version = report_definition_version
+                    final_job.report_definition_snapshot = definition_snapshot
+                    final_job.report_parse_warnings = parse_warnings
                     final_job.prompt_rendered = rendered
                     final_job.status = "failed" if error_msg else "completed"
                     final_job.error = error_msg

@@ -79,6 +79,28 @@ def _digits_only(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+def _gtin_check_digit(body: str) -> int:
+    """
+    Compute GTIN check digit for body lengths 7/11/12/13.
+    """
+    total = 0
+    for i, ch in enumerate(reversed(body), start=1):
+        total += int(ch) * (3 if i % 2 == 1 else 1)
+    return (10 - (total % 10)) % 10
+
+
+def _is_valid_gtin(d: str) -> bool:
+    """
+    Strict GTIN validation: allowed lengths + check-digit verification.
+    """
+    if not _valid_gtin_length(d):
+        return False
+    body, check = d[:-1], d[-1]
+    if not body or not check.isdigit():
+        return False
+    return _gtin_check_digit(body) == int(check)
+
+
 def _collect_gtin_codes(pdp_data: dict) -> set[str]:
     codes: set[str] = set()
     attrs = pdp_data.get("attributes") or {}
@@ -89,9 +111,9 @@ def _collect_gtin_codes(pdp_data: dict) -> set[str]:
         vs = str(v).strip()
         if _GTIN_KEY.search(k):
             d = _digits_only(vs)
-            if _valid_gtin_length(d):
+            if _is_valid_gtin(d):
                 codes.add(d)
-        elif vs.isdigit() and _valid_gtin_length(vs):
+        elif vs.isdigit() and _is_valid_gtin(vs):
             codes.add(vs)
 
     for blob in (
@@ -101,7 +123,7 @@ def _collect_gtin_codes(pdp_data: dict) -> set[str]:
     ):
         for m in re.finditer(r"\b(\d{12}|\d{13}|\d{14}|\d{8})\b", blob):
             d = m.group(1)
-            if _valid_gtin_length(d):
+            if _is_valid_gtin(d):
                 codes.add(d)
     return codes
 
@@ -408,6 +430,32 @@ def build_verified_context_block(
         ]
     )
     return "\n".join(parts)
+
+
+def match_rate_for_reason(reason: str) -> float:
+    """Heuristic confidence score shown in competitor-selection UI."""
+    mapping = {
+        "gtin_match": 1.0,
+        "mpn_and_brand_match": 0.95,
+        "mpn_match": 0.8,
+    }
+    return mapping.get((reason or "").strip(), 0.0)
+
+
+def select_verified_competitors(
+    verified_rows: list[dict[str, Any]],
+    selected_urls: list[str] | None,
+) -> list[dict[str, Any]]:
+    """
+    Keep only user-selected verified competitors.
+    If selected_urls is falsy, keep all verified rows.
+    """
+    if not selected_urls:
+        return list(verified_rows)
+    allowed = {u.strip() for u in selected_urls if (u or "").strip()}
+    if not allowed:
+        return []
+    return [row for row in verified_rows if (row.get("url") or "").strip() in allowed]
 
 
 async def run_competitor_verification(
